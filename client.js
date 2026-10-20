@@ -9,8 +9,8 @@ window.__ModuleLoader__.load({
     const ROW = 'session-memory';
 
     const en = {
-      summary: 'Records local session memory and interaction habits, restoring habits before facts.',
-      title: 'Storage and habits',
+      summary: 'Records local session memory, identity, and interaction habits; restores identity, habits, then facts.',
+      title: 'Identity, storage and habits',
       storageTitle: 'Storage',
       directory: 'Storage root directory',
       directoryHint: 'All local data is written under this directory: fact memory and the two habit txt files. Leave blank to use the default $DSH_HOME/context-memory.',
@@ -22,6 +22,10 @@ window.__ModuleLoader__.load({
       habitsFile: 'Habits: <root>/habits/<workspace>.1.txt (latest)',
       habitsBackup: 'Habits backup: <root>/habits/<workspace>.2.txt (previous)',
       migration: 'Changing the directory affects only data written afterwards. Existing files are not moved automatically.',
+      identityTitle: 'Identity',
+      identityFile: 'Identity INI file',
+      identityHint: 'Optional. An INI persona file, injected before habits and facts. Leave blank to disable the identity layer.',
+      identityPlaceholder: 'D:\\path\\to\\persona.zh-cn.ini',
       habitsTitle: 'Interaction habits',
       habits: 'Summarize interaction habits',
       habitsHint: 'Keeps at most two concise txt summaries per workspace and restores habits before facts in the next session.',
@@ -34,8 +38,8 @@ window.__ModuleLoader__.load({
     };
 
     const zh = {
-      summary: '本地记录会话事实与交互习惯，并在下一个会话中先恢复习惯、再恢复事实。',
-      title: '存储与交互习惯',
+      summary: '本地记录会话事实、身份层与交互习惯；接入时按身份、习惯、事实的顺序恢复。',
+      title: '身份、存储与交互习惯',
       storageTitle: '存储',
       directory: '存储根目录',
       directoryHint: '所有本地数据都写入该目录：事实记忆与两份习惯 txt 文件。留空使用默认目录 $DSH_HOME/context-memory。',
@@ -47,6 +51,10 @@ window.__ModuleLoader__.load({
       habitsFile: '习惯：<root>/habits/<工作区>.1.txt（最新）',
       habitsBackup: '习惯备份：<root>/habits/<工作区>.2.txt（上一次）',
       migration: '更改目录只影响之后写入的数据，旧目录中的文件不会自动迁移。',
+      identityTitle: '身份层',
+      identityFile: '身份 INI 文件',
+      identityHint: '可选。INI 人格文件，会在交互习惯和会话事实之前注入；留空关闭身份层。',
+      identityPlaceholder: 'D:\\path\\to\\persona.zh-cn.ini',
       habitsTitle: '交互习惯',
       habits: '归纳交互习惯',
       habitsHint: '每个工作区最多保留两份简短的 txt 总结；下一个会话会先恢复习惯，再恢复事实。',
@@ -130,18 +138,21 @@ window.__ModuleLoader__.load({
       const writable = (state.writable ?? form.writable) !== false;
       const storedDirectory = typeof value.directory === 'string' ? value.directory : '';
       const storedHabits = value.habitsEnabled !== false;
+      const storedIdentity = typeof value.identityFile === 'string' ? value.identityFile : '';
 
       const [directory, setDirectory] = React.useState(storedDirectory);
       const [habits, setHabits] = React.useState(storedHabits);
+      const [identityFile, setIdentityFile] = React.useState(storedIdentity);
       const [busy, setBusy] = React.useState(false);
       const [status, setStatus] = React.useState('');
 
       React.useEffect(() => {
         setDirectory(storedDirectory);
         setHabits(storedHabits);
-      }, [storedDirectory, storedHabits, revision]);
+        setIdentityFile(storedIdentity);
+      }, [storedDirectory, storedHabits, storedIdentity, revision]);
 
-      const dirty = directory !== storedDirectory || habits !== storedHabits;
+      const dirty = directory !== storedDirectory || habits !== storedHabits || identityFile !== storedIdentity;
       const disabled = !writable || busy;
       const root = directory.trim().length > 0 ? directory.trim().replace(/[\\/]+$/u, '') : '';
 
@@ -150,6 +161,7 @@ window.__ModuleLoader__.load({
         const ops = [];
         if (directory !== storedDirectory) ops.push({ op: 'set', path: ['directory'], value: directory.trim() });
         if (habits !== storedHabits) ops.push({ op: 'set', path: ['habitsEnabled'], value: habits });
+        if (identityFile !== storedIdentity) ops.push({ op: 'set', path: ['identityFile'], value: identityFile.trim() });
         if (ops.length === 0) return;
         setBusy(true);
         setStatus('');
@@ -203,6 +215,21 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.mono },
               `${t('factsFile')}\n${t('habitsFile')}\n${t('habitsBackup')}`.replace(/<root>/gu, root || t('defaultPath')))),
         ),
+        h('section', { style: styles.section },
+          h('h3', { style: styles.heading }, t('identityTitle')),
+          h('div', { style: styles.field },
+            h('label', { style: styles.label, htmlFor: 'session-memory-identity' }, t('identityFile')),
+            h('input', {
+              id: 'session-memory-identity',
+              type: 'text',
+              value: identityFile,
+              disabled,
+              spellCheck: false,
+              placeholder: t('identityPlaceholder'),
+              style: styles.input,
+              onChange: (event) => setIdentityFile(event.target.value),
+            }),
+            h('p', { style: styles.hint }, t('identityHint')))),
         h('section', { style: styles.section },
           h('h3', { style: styles.heading }, t('habitsTitle')),
           h('label', { style: styles.checkboxRow },

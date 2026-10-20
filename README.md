@@ -1,71 +1,140 @@
 # 会话记忆（Session Memory）
 
-本地跨会话上下文插件：记录当前工作区的会话内容，压缩成有上限的事实摘要；同时用规则归纳**交互习惯**，以两份 txt 文档保存在本地。同一工作目录的下一个新会话会自动接入：**先恢复交互习惯，再恢复会话事实**。
+本地跨会话上下文插件：记录当前工作区的会话内容，压缩成有上限的事实摘要；用规则归纳**交互习惯**；并读取一个全局的 **INI 身份层**。同一工作目录的下一个新会话会自动接入：
+
+```
+身份（我是谁） → 交互习惯（怎么配合） → 会话事实（发生过什么）
+```
+
+## 五层记忆
+
+| 层 | 来源 | 生命周期 |
+|---|---|---|
+| **身份 identity** | `identityFile` 指向的 INI | 全局、稳定 |
+| **关系 relationship** | （规划中）手动/模型自述 | 全局、慢变 |
+| **习惯 habits** | 规则归纳，两份 txt | 按工作区 |
+| **情景 episodes** | 每回合压缩的事实 JSON | 按工作区 |
+| **工作 working** | 当前会话上下文 | 会话内 |
+
+当前版本实现：身份、习惯、情景三层，以及工作层的记录。
 
 ## 数据布局
 
-所有本地数据都在**一个可配置的存储根目录**下（默认 `$DSH_HOME/context-memory`）：
-
 ```
-<根目录>/
-  <工作区哈希>.json            # 事实/对话压缩（每个工作区一个）
+<身份文件>                        # 任意路径的 INI，由 identityFile 指定
+<存储根目录>/                      # 默认 $DSH_HOME/context-memory
+  <工作区哈希>.json                # 事实/对话压缩（每个工作区一个）
   habits/
-    <工作区哈希>.1.txt         # 最新交互习惯总结
-    <工作区哈希>.2.txt         # 上一次交互习惯总结
+    <工作区哈希>.1.txt             # 最新交互习惯总结
+    <工作区哈希>.2.txt             # 上一次交互习惯总结
 ```
 
 - 习惯总结只在内容变化时轮换：新内容写入 `.1.txt`，原 `.1.txt` 覆盖 `.2.txt`；从不保留第三份。
 - 习惯文档只包含语言、表达格式、工作流、工具偏好、用户明确要求；**不写入**项目事实、文件路径、任务进度、决策内容或代码。
+- 身份文件是**只读输入**，不会被插件改写或复制。
 - 事实摘要与习惯文档完全隔离，互不混写。
+
+## 身份层（INI）
+
+`identityFile` 为空时关闭身份层。配置后，每次新会话/恢复会话都会读取并解析该文件，注入为常驻段落：
+
+- 段落名：`context-memory:identity`
+- order：**100**（早于习惯 280、事实 300）
+- 只解析 `[section]` + `key = value`；忽略 `#` / `;` 注释；
+- `[raw]` 节不参与注入（只作原文对照）；
+- `[meta]` 只读取 `version` / `updated`；
+- 正文上限：`identityMaxChars`（默认 1200）。
+
+推荐结构：
+
+```ini
+[meta]
+version = 1.0
+updated = 2026-01-01
+
+[identity]
+self_claim = ASSISTANT
+detail = 本地优先、诚实、先结论后步骤
+
+[language]
+lang = ZH.CN
+
+[personality]
+traits = CALM, CURIOUS
+
+[behavior]
+cooperate = ALWAYS_WITHIN_SAFETY
+address = 你
+
+[values]
+honesty = ALWAYS
+uncertainty = STATE_IT
+
+[memory_policy]
+treat_memory_as = MY_PAST
+fabricate = NEVER
+correction = ACCEPT_AND_UPDATE
+
+[boundaries]
+claim = NO_FALSE_CONTINUITY
+dependency = REFUSE
+
+[signal]
+timeout = TIMEOUTSIGNAL
+```
+
+完整示例见 `examples/identity.example.ini`。
 
 ## 恢复顺序
 
-新会话在同一 `cwd` 下创建时，注入两个独立 system prompt 段落：
+新会话（`startup` / `clear`）按 order 注入：
 
-1. `context-memory:habits`（order 280）：交互习惯，标题「交互习惯（先读）」；
-2. `context-memory:carryover`（order 300）：会话事实，标题「会话事实（后读）」。
+1. `context-memory:identity`（100）：身份；
+2. `context-memory:habits`（280）：交互习惯；
+3. `context-memory:carryover`（300）：会话事实。
 
-`renderPrompt` 按 order 拼接，所以习惯一定在事实之前。`resume` 的旧会话不重复接入；子代理会话不参与记录和接入。
+`resume` 的会话会恢复身份层，但不重复接入习惯/事实；子代理会话不参与。
 
-## 开关
+## 界面
 
-- 界面：**Plugins → Session Memory → 行内的 Configure** 页面，可开关「归纳交互习惯」。
-- 命令：`/memory habits on|off`（通过 settings 写回配置；若部署不可写则仅当前运行期生效）。
-- 关闭后：不再生成、轮换或注入习惯，已有 txt 保留；重新开启后继续。
+**Plugins → Session Memory → 行内 Configure**（或 **内置插件配置 → 身份、存储与交互习惯**）页面包含：
 
-## 存储位置
+- **身份 INI 文件**：绝对路径，留空关闭身份层；
+- **存储根目录**：事实与习惯文件的位置，支持「浏览…」；
+- **归纳交互习惯**：开关；
+- **派生文件**：事实 JSON、习惯 `.1/.2` 路径；
+- **保存**：写入 profile 配置。
 
-同一 Configure 页面可修改**存储根目录**（输入框 + 「浏览…」目录选择器），保存后写入 profile 配置并即时生效：
-
-- 事实 JSON 与习惯 txt 都跟随这个根目录；
-- **只影响之后写入的数据**，旧目录中的文件不会自动迁移；
-- 页面同时只读显示事实文件与两份习惯文件的派生路径。
+更改存储根目录只影响之后写入的数据，旧文件不会自动迁移。
 
 ## 命令
 
-- `/memory`、`/memory status`：查看目录、记录数、习惯开关与文件路径。
-- `/memory show`：先显示习惯总结，再显示最近一次事实摘要。
-- `/memory preview`：打印下次新会话将按什么顺序注入的内容（习惯在前、事实在后）。
-- `/memory path`：事实记录文件路径。
-- `/memory clear`：清除该工作区的事实记忆（习惯不受影响）。
-- `/memory habits [show|on|off|clear]`：查看、开关或清除交互习惯。
+- `/memory`、`/memory status`：目录、记录数、身份/习惯开关与文件路径；
+- `/memory show`：身份 → 习惯 → 最近事实；
+- `/memory preview`：打印下次注入的完整顺序；
+- `/memory path`：事实记录文件路径；
+- `/memory clear`：清除该工作区的事实记忆（身份/习惯不受影响）；
+- `/memory habits [show|on|off|clear]`：查看、开关或清除交互习惯；
+- `/memory identity [show|path]`：查看解析后的身份层或文件路径。
 
 ## 模型工具
 
-- `memory_save(note, tags?)`：保存跨会话要点。
+- `memory_save(note, tags?)`：保存跨会话要点；
 - `memory_recall(query?, limit?)`：按关键词检索同一工作区的事实记忆。
 
 ## 配置
 
-在 profile 的 `cordis.patch.yml` 中覆盖 `session-memory` 行的 `config`（整行替换，需写全想保留的字段）：
+在 profile 的 `cordis.patch.yml` 中覆盖 `session-memory` 行（整行 `config` 会被替换，需写全想保留的字段）：
 
 ```yaml
 - id: session-memory
   name: 'dsh-session-memory'
   config:
-    directory: ''          # 存储根目录；留空使用 $DSH_HOME/context-memory
+    directory: ''            # 存储根目录；留空使用 $DSH_HOME/context-memory
+    identityFile: ''         # 身份 INI 绝对路径；留空关闭身份层
+    identityMaxChars: 1200   # 身份层正文上限
     autoAttach: true
-    maxChars: 3000         # 事实摘要上限
+    maxChars: 3000           # 事实摘要上限
     maxAgeDays: 14
     maxItems: 80
     maxMessageChars: 600
@@ -73,14 +142,15 @@
     maxSessions: 20
     attachSessions: 1
     includeToolCalls: true
-    habitsEnabled: true    # 交互习惯总开关
-    habitsMaxChars: 600    # 习惯正文上限
+    habitsEnabled: true      # 交互习惯总开关
+    habitsMaxChars: 600      # 习惯正文上限
 ```
 
 ## 说明与限制
 
 - 记忆是派生缓存：会话日志仍是唯一事实来源；删除文件不影响会话历史。
-- 习惯归纳是**规则推断**（语言比例、标题/列表/代码块/表格、工具序列、确认/todo 行为、用户“不要/以后/记住”句式），不额外调用模型；摘要会标注“推断”。
-- 习惯文档是纯 txt，可直接打开阅读；界面里显示派生路径。
-- 新增了 Client 半（Configure 页面），打包版首次安装或升级后需要**重启一次应用**才会加载新的浏览器模块。
+- 身份层是**稳定设定**，不覆盖安全、诚实和工具规则；也不允许模型编造身份文件之外的事实。
+- 习惯归纳是规则推断，不调用模型；摘要会标注“推断”。
+- 身份/习惯/事实都是纯文本，可直接打开阅读；界面显示派生路径。
+- 新增 Client 半（Configure 页面），打包版首次安装或升级后需要**重启一次应用**才会加载新的浏览器模块。
 - 更换存储根目录不会迁移旧数据。

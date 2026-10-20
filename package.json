@@ -1,7 +1,7 @@
 {
   "name": "dsh-session-memory",
-  "version": "1.0.0",
-  "description": "Local cross-session context memory for DeepSeek Harness: records and compresses each workspace session, keeps rule-based interaction habits, and restores habits before facts in the next session.",
+  "version": "1.1.0",
+  "description": "Local cross-session context memory for DeepSeek Harness: records and compresses each workspace session, keeps rule-based interaction habits, injects a global INI identity layer, and restores identity, habits, then facts in the next session.",
   "type": "module",
   "exports": {
     ".": "./index.js",
@@ -11,14 +11,19 @@
   },
   "files": [
     "index.js",
+    "identity.js",
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
     "README.md",
     "USAGE.md",
-    "ARCHITECTURE.md"
+    "ARCHITECTURE.md",
+    "examples/*.ini"
   ],
+  "scripts": {
+    "test": "node --test"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -48,7 +53,9 @@
     "session-memory",
     "context",
     "memory",
-    "habits"
+    "habits",
+    "identity",
+    "persona"
   ],
   "peerDependencies": {
     "@deepseek-ai/schemastery": ">=3.18.0"

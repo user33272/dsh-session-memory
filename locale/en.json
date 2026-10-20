@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Session Memory",
-    "description": "Records and compresses this workspace's sessions locally, then attaches the compressed context to your next session automatically."
+    "description": "Records and compresses workspace sessions, keeps interaction habits, and injects a global INI identity layer before habits and facts."
   }
 }

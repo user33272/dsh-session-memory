@@ -18,17 +18,20 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import z from '@deepseek-ai/schemastery';
+import { identityFromText } from './identity.js';
 
 export const name = 'session-memory';
 export const inject = ['systemPrompt', 'tools', 'sessions'];
 
+const IDENTITY_SECTION = 'context-memory:identity';
 const FACTS_SECTION = 'context-memory:carryover';
 const HABITS_SECTION = 'context-memory:habits';
+const IDENTITY_ORDER = 100;
 const FACTS_ORDER = 300;
 const HABITS_ORDER = 280;
 const FORMAT_VERSION = 1;
 const DAY_MS = 86_400_000;
-const USAGE = '/memory [status|show|path|preview|clear|habits [on|off|show|clear]]';
+const USAGE = '/memory [status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path]]';
 
 export const Config = z.object({
   directory: z.string().default(''),
@@ -43,6 +46,8 @@ export const Config = z.object({
   includeToolCalls: z.boolean().default(true),
   habitsEnabled: z.boolean().default(true),
   habitsMaxChars: z.number().min(200).max(2000).default(600),
+  identityFile: z.string().default(''),
+  identityMaxChars: z.number().min(200).max(3000).default(1200),
 });
 
 function clampInt(value, fallback, min, max) {
@@ -77,6 +82,10 @@ function readConfig(raw) {
     includeToolCalls: source.includeToolCalls !== false,
     habitsEnabled: source.habitsEnabled !== false,
     habitsMaxChars: clampInt(source.habitsMaxChars, 600, 200, 2000),
+    identityFile: typeof source.identityFile === 'string' && source.identityFile.trim().length > 0
+      ? resolve(source.identityFile.trim())
+      : '',
+    identityMaxChars: clampInt(source.identityMaxChars, 1200, 200, 3000),
   };
 }
 
@@ -653,7 +662,32 @@ export function apply(ctx, config) {
     sectionDisposers.set(key, dispose);
   }
 
-  async function attach(agent) {
+  async function readIdentity() {
+    if (!cfg.identityFile) return '';
+    try {
+      const text = await readFile(cfg.identityFile, 'utf8');
+      return identityFromText(text, cfg.identityMaxChars);
+    } catch (error) {
+      report(`读取身份文件失败 ${cfg.identityFile}: ${String(error)}`);
+      return '';
+    }
+  }
+
+  async function attachIdentity(agent) {
+    const systemPrompt = agent.ctx?.systemPrompt;
+    if (!systemPrompt) return;
+    const identity = await readIdentity();
+    if (identity.length === 0) return;
+    const dispose = systemPrompt.section({
+      name: IDENTITY_SECTION,
+      order: IDENTITY_ORDER,
+      text: identity,
+      interpolate: false,
+    });
+    rememberSection(`${agent.id}:identity`, dispose);
+  }
+
+  async function attachMemory(agent) {
     const header = agent.session?.header ?? {};
     if (typeof header.cwd !== 'string' || header.cwd.length === 0) return;
     const systemPrompt = agent.ctx?.systemPrompt;
@@ -702,7 +736,8 @@ export function apply(ctx, config) {
     try {
       const entry = ensureEntry(agent.session, true);
       if (!entry) return;
-      if (cfg.autoAttach && (source === 'startup' || source === 'clear')) await attach(agent);
+      await attachIdentity(agent);
+      if (cfg.autoAttach && (source === 'startup' || source === 'clear')) await attachMemory(agent);
     } catch (error) {
       report(`初始化会话记忆失败 ${agent?.id}: ${String(error)}`);
     }
@@ -710,7 +745,7 @@ export function apply(ctx, config) {
 
   ctx.on('agent/disposed', ({ agent }) => {
     try {
-      for (const key of [`${agent.id}:habits`, `${agent.id}:facts`]) {
+      for (const key of [`${agent.id}:identity`, `${agent.id}:habits`, `${agent.id}:facts`]) {
         const dispose = sectionDisposers.get(key);
         if (dispose) {
           try {
@@ -904,6 +939,7 @@ export function apply(ctx, config) {
     if (!head || head === 'status') {
       const all = collectRecords(workspace, invocation.agent.id, true);
       const habitText = cfg.habitsEnabled ? await readHabitFile(header.cwd) : '';
+      const identity = await readIdentity();
       const lines = [
         '会话记忆（本地）',
         `存储目录：${cfg.directory}`,
@@ -911,6 +947,8 @@ export function apply(ctx, config) {
         `记录文件：${workspace.file}`,
         `保留策略：${cfg.maxAgeDays} 天 / 最多 ${cfg.maxSessions} 个会话`,
         `压缩策略：每次接入 ${cfg.maxChars} 字以内，接入最近 ${cfg.attachSessions} 个会话`,
+        `身份文件：${cfg.identityFile || '未设置（关闭）'}`,
+        `身份层：${identity ? `已启用（${identity.length} 字，order ${IDENTITY_ORDER}）` : '未启用'}`,
         `交互习惯：${cfg.habitsEnabled ? '已开启' : '已关闭'}（最多保留 2 份，先于事实恢复）`,
         `习惯文件：${habitPath}`,
         `习惯备份：${previousHabitPath}`,
@@ -937,7 +975,9 @@ export function apply(ctx, config) {
       const all = collectRecords(workspace, invocation.agent.id, true);
       const latest = all[0];
       const habitText = cfg.habitsEnabled ? await readHabitFile(header.cwd) : '';
+      const identity = await readIdentity();
       const chunks = [];
+      if (identity) chunks.push(identity);
       if (habitText) chunks.push(habitsSectionText(habitText));
       if (latest) {
         const digest = latest.digest ?? buildDigest(latest, cfg);
@@ -956,15 +996,40 @@ export function apply(ctx, config) {
         .slice(0, cfg.attachSessions);
       const facts = renderFacts(all);
       const habitText = cfg.habitsEnabled ? await readHabitFile(header.cwd) : '';
+      const identity = await readIdentity();
       const chunks = [];
+      if (identity) chunks.push(identity);
       if (habitText) chunks.push(habitsSectionText(habitText));
       if (facts) chunks.push(factsSectionText(facts));
       return {
         kind: 'success',
         text: chunks.length > 0
-          ? `以下内容将按此顺序注入同目录的下一个新会话：\n\n${chunks.join('\n\n---\n\n')}`
+          ? `以下内容将按此顺序注入：身份（order ${IDENTITY_ORDER}）→ 交互习惯（order ${HABITS_ORDER}）→ 会话事实（order ${FACTS_ORDER}）。\n\n${chunks.join('\n\n---\n\n')}`
           : '当前没有可接入的记忆。',
       };
+    }
+
+    if (head === 'identity') {
+      const action = rest[0] ?? 'show';
+      if (action === 'path') {
+        return { kind: 'success', text: cfg.identityFile || '未设置身份文件（身份层关闭）。' };
+      }
+      if (action === 'show') {
+        const identity = await readIdentity();
+        if (identity) {
+          return {
+            kind: 'success',
+            text: `身份层（order ${IDENTITY_ORDER}）\n文件：${cfg.identityFile}\n\n${identity}`,
+          };
+        }
+        return {
+          kind: 'success',
+          text: cfg.identityFile
+            ? `身份文件已配置，但没有解析到有效内容：${cfg.identityFile}`
+            : '未配置身份文件。可在插件设置页填写 identityFile，或在 profile 配置中设置。',
+        };
+      }
+      return { kind: 'error', text: `未知参数「${action}」。用法：/memory identity [show|path]` };
     }
 
     if (head === 'clear') {
@@ -1016,8 +1081,8 @@ export function apply(ctx, config) {
   ctx.inject(['commands'], (commandCtx) => {
     commandCtx.effect(() => commandCtx.commands.register({
       name: 'memory',
-      description: '查看、预览或清除本地跨会话记忆与交互习惯',
-      input: { hint: '[status|show|path|preview|clear|habits [on|off|show|clear]]' },
+      description: '查看、预览或清除本地跨会话记忆、交互习惯与身份层',
+      input: { hint: '[status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path]]' },
       handler: memoryCommand,
     }));
   });
