@@ -1,0 +1,9 @@
+# Inserts the local cross-session memory plugin into this profile.
+# Configuration is optional; the defaults below are the same as the code defaults.
+- insert:
+    - id: session-memory
+      name: 'dsh-session-memory'
+      config:
+        autoAttach: true
+        maxChars: 3000
+        maxAgeDays: 14

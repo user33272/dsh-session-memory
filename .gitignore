@@ -1,0 +1,8 @@
+node_modules/
+_tgz/
+context-memory/
+*.log
+.DS_Store
+Thumbs.db
+.env
+.env.*

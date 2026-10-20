@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Memory",
+    "description": "Records and compresses this workspace's sessions locally, then attaches the compressed context to your next session automatically."
+  }
+}
