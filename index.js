@@ -10,10 +10,10 @@
  *
  * @module dsh-session-memory
  */
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, basename, resolve } from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { identityFromText } from './identity.js';
 import { clearPersona, listPersonaVersions, readPersona, writePersona } from './persona.js';
@@ -25,13 +25,15 @@ const IDENTITY_SECTION = 'context-memory:identity';
 const PERSONA_SECTION = 'context-memory:persona';
 const FACTS_SECTION = 'context-memory:carryover';
 const HABITS_SECTION = 'context-memory:habits';
+const CROSS_SECTION = 'context-memory:cross-workspace';
 const IDENTITY_ORDER = 100;
 const PERSONA_ORDER = 150;
 const FACTS_ORDER = 300;
+const CROSS_ORDER = 310;
 const HABITS_ORDER = 280;
 const FORMAT_VERSION = 1;
 const DAY_MS = 86_400_000;
-const USAGE = '/memory [status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path]|persona [show|versions|clear]]';
+const USAGE = '/memory [status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path]|persona [show|versions|clear]|workspaces|cross <query>]';
 
 export const Config = z.object({
   directory: z.string().default(''),
@@ -51,6 +53,10 @@ export const Config = z.object({
   personaDirectory: z.string().default(''),
   personaMaxChars: z.number().min(200).max(4000).default(1200),
   personaKeepVersions: z.number().min(1).max(20).default(5),
+  crossWorkspaceEnabled: z.boolean().default(false),
+  crossWorkspaceAttach: z.boolean().default(false),
+  crossWorkspaceMaxChars: z.number().min(300).max(4000).default(1500),
+  crossWorkspaceSessions: z.number().min(1).max(10).default(3),
 });
 
 function clampInt(value, fallback, min, max) {
@@ -94,6 +100,10 @@ function readConfig(raw) {
       : join(home, 'persona'),
     personaMaxChars: clampInt(source.personaMaxChars, 1200, 200, 4000),
     personaKeepVersions: clampInt(source.personaKeepVersions, 5, 1, 20),
+    crossWorkspaceEnabled: source.crossWorkspaceEnabled === true,
+    crossWorkspaceAttach: source.crossWorkspaceAttach === true,
+    crossWorkspaceMaxChars: clampInt(source.crossWorkspaceMaxChars, 1500, 300, 4000),
+    crossWorkspaceSessions: clampInt(source.crossWorkspaceSessions, 3, 1, 10),
   };
 }
 
@@ -658,6 +668,83 @@ export function apply(ctx, config) {
     return blocks.join('\n\n');
   }
 
+  async function loadOtherWorkspaces(currentKey) {
+    let names;
+    try {
+      names = await readdir(cfg.directory);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') report(`读取工作区列表失败 ${cfg.directory}: ${String(error)}`);
+      return [];
+    }
+    const cutoff = Date.now() - cfg.maxAgeDays * DAY_MS;
+    const workspaces = [];
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue;
+      const key = basename(name, '.json');
+      if (key === currentKey) continue;
+      const file = join(cfg.directory, name);
+      try {
+        const data = JSON.parse(await readFile(file, 'utf8'));
+        if (!data || data.version !== FORMAT_VERSION || !data.sessions || typeof data.sessions !== 'object') continue;
+        const records = Object.values(data.sessions)
+          .filter((record) => typeof record?.digest === 'string'
+            && record.digest.trim().length > 0
+            && typeof record.updatedAt === 'number'
+            && record.updatedAt >= cutoff)
+          .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+        if (records.length === 0) continue;
+        workspaces.push({
+          key,
+          cwd: typeof data.cwd === 'string' ? data.cwd : '(unknown)',
+          updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : (records[0].updatedAt ?? 0),
+          records,
+        });
+      } catch (error) {
+        report(`读取其他工作区失败 ${file}: ${String(error)}`);
+      }
+    }
+    return workspaces.sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  function renderCrossWorkspace(workspaces) {
+    const entries = [];
+    for (const workspace of workspaces) {
+      for (const record of workspace.records) entries.push({ workspace, record });
+    }
+    entries.sort((a, b) => (b.record.updatedAt ?? 0) - (a.record.updatedAt ?? 0));
+    const chosen = entries.slice(0, cfg.crossWorkspaceSessions);
+    if (chosen.length === 0) return '';
+    const blocks = [
+      '## 其他工作区的工作记录（跨工作区）',
+      '以下只包含同一台机器上其他工作区的工作事实，不含身份/人格数据；按需参考，不要对外扩散。',
+    ];
+    let budget = cfg.crossWorkspaceMaxChars;
+    for (const { workspace, record } of chosen) {
+      if (budget <= 0) break;
+      const digest = trimTo(record.digest.trim(), Math.min(900, budget));
+      const title = record.title ? `「${record.title}」` : '';
+      blocks.push(`### 工作区：${workspace.cwd} · 会话 ${record.id}${title}（更新于 ${stamp(record.updatedAt)}）\n${digest}`);
+      budget -= digest.length;
+    }
+    return blocks.join('\n\n');
+  }
+
+  async function attachCrossWorkspace(agent, workspace) {
+    if (!cfg.crossWorkspaceEnabled || !cfg.crossWorkspaceAttach) return;
+    const systemPrompt = agent.ctx?.systemPrompt;
+    if (!systemPrompt) return;
+    const others = await loadOtherWorkspaces(workspace.key);
+    const text = renderCrossWorkspace(others);
+    if (text.length === 0) return;
+    const dispose = systemPrompt.section({
+      name: CROSS_SECTION,
+      order: CROSS_ORDER,
+      text,
+      interpolate: false,
+    });
+    rememberSection(`${agent.id}:cross`, dispose);
+  }
+
   function rememberSection(key, dispose) {
     const previous = sectionDisposers.get(key);
     if (previous) {
@@ -758,6 +845,7 @@ export function apply(ctx, config) {
       });
       rememberSection(`${agent.id}:facts`, dispose);
     }
+    await attachCrossWorkspace(agent, workspace);
   }
 
   ctx.effect(() => () => {
@@ -786,7 +874,7 @@ export function apply(ctx, config) {
 
   ctx.on('agent/disposed', ({ agent }) => {
     try {
-      for (const key of [`${agent.id}:identity`, `${agent.id}:persona`, `${agent.id}:habits`, `${agent.id}:facts`]) {
+      for (const key of [`${agent.id}:identity`, `${agent.id}:persona`, `${agent.id}:habits`, `${agent.id}:facts`, `${agent.id}:cross`]) {
         const dispose = sectionDisposers.get(key);
         if (dispose) {
           try {
@@ -874,7 +962,7 @@ export function apply(ctx, config) {
 
   ctx.tools.register({
     name: 'memory_recall',
-    description: '检索本机保存的同一工作目录的会话记忆。省略 query 时返回最近一次压缩记忆；提供 query 时按关键词匹配历史记忆，用于找回更早会话里的决定、路径或约定。',
+    description: '检索本机保存的工作记忆。默认只查当前工作目录；scope=all 时在已启用跨工作区读取的前提下检索其他工作区的工作记录（只含工作事实，绝不含身份/人格数据）。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -886,6 +974,11 @@ export function apply(ctx, config) {
         limit: {
           type: 'integer',
           description: '返回条数，1-5，默认 3。',
+        },
+        scope: {
+          type: 'string',
+          enum: ['workspace', 'all'],
+          description: 'workspace（默认）只查当前工作目录；all 还查其他工作区的工作记录。',
         },
       },
     },
@@ -900,11 +993,12 @@ export function apply(ctx, config) {
               type: 'object',
               additionalProperties: false,
               properties: {
+                workspace: { type: 'string' },
                 sessionId: { type: 'string' },
                 updatedAt: { type: 'integer' },
                 excerpt: { type: 'string' },
               },
-              required: ['sessionId', 'updatedAt', 'excerpt'],
+              required: ['workspace', 'sessionId', 'updatedAt', 'excerpt'],
             },
           },
           total: { type: 'integer' },
@@ -914,8 +1008,8 @@ export function apply(ctx, config) {
       render: (_args, value) => [{
         type: 'text',
         text: value.matches.length === 0
-          ? '没有找到相关的本地会话记忆。'
-          : value.matches.map((match) => `[${match.sessionId} · ${stamp(match.updatedAt)}]\n${match.excerpt}`).join('\n\n'),
+          ? '没有找到相关的本地工作记忆。'
+          : value.matches.map((match) => `[${match.workspace} · ${match.sessionId} · ${stamp(match.updatedAt)}]\n${match.excerpt}`).join('\n\n'),
       }],
     },
     async execute(args, exec) {
@@ -927,11 +1021,23 @@ export function apply(ctx, config) {
         return { matches: [], total: 0 };
       }
       const workspace = await loadWorkspace(header.cwd);
-      const all = collectRecords(workspace, agent.id, true);
-      const query = typeof args?.query === 'string' ? args.query.trim().toLowerCase() : '';
+      const scope = args?.scope === 'all' ? 'all' : 'workspace';
       const limit = clampInt(args?.limit, 3, 1, 5);
+      const query = typeof args?.query === 'string' ? args.query.trim().toLowerCase() : '';
+      const candidates = collectRecords(workspace, agent.id, true)
+        .map((record) => ({ workspace: header.cwd, record }));
+      if (scope === 'all') {
+        if (!cfg.crossWorkspaceEnabled) {
+          throw new Error('跨工作区读取未启用；请在插件设置中开启，或使用默认的 workspace 范围');
+        }
+        const others = await loadOtherWorkspaces(workspace.key);
+        for (const other of others) {
+          for (const record of other.records) candidates.push({ workspace: other.cwd, record });
+        }
+      }
       const hits = [];
-      for (const record of all) {
+      for (const candidate of candidates) {
+        const record = candidate.record;
         const digest = record.digest ?? '';
         if (query.length > 0) {
           const haystack = `${record.title ?? ''}\n${digest}\n${(record.notes ?? []).map((note) => note.text).join('\n')}`.toLowerCase();
@@ -945,7 +1051,12 @@ export function apply(ctx, config) {
           const note = (record.notes ?? []).find((entryNote) => String(entryNote.text ?? '').toLowerCase().includes(query));
           if (note) excerpt = `要点：${note.text}`;
         }
-        hits.push({ sessionId: record.id, updatedAt: record.updatedAt ?? 0, excerpt });
+        hits.push({
+          workspace: candidate.workspace,
+          sessionId: record.id,
+          updatedAt: record.updatedAt ?? 0,
+          excerpt,
+        });
       }
       return { matches: hits.slice(0, limit), total: hits.length };
     },
@@ -1084,6 +1195,55 @@ export function apply(ctx, config) {
       return { kind: 'error', text: `未知参数「${action}」。用法：/memory persona [show|versions|clear]` };
     }
 
+    if (head === 'workspaces') {
+      if (!cfg.crossWorkspaceEnabled) {
+        return { kind: 'error', text: '跨工作区读取未启用；请先在插件设置中勾选「允许跨工作区读取工作记录」。' };
+      }
+      const workspaces = await loadOtherWorkspaces('');
+      if (workspaces.length === 0) {
+        return { kind: 'success', text: '还没有可读取的其他工作区工作记录。' };
+      }
+      const lines = [
+        `其他工作区（只含工作事实，不含人格/身份；共 ${workspaces.length} 个）`,
+        '',
+      ];
+      for (const workspace of workspaces) {
+        const latest = workspace.records[0];
+        lines.push(`- ${workspace.cwd}`);
+        lines.push(`  更新：${stamp(workspace.updatedAt)} · 会话数：${workspace.records.length} · 最近：${latest?.title || latest?.id || '(无标题)'}`);
+      }
+      return { kind: 'success', text: lines.join('\n') };
+    }
+
+    if (head === 'cross') {
+      if (!cfg.crossWorkspaceEnabled) {
+        return { kind: 'error', text: '跨工作区读取未启用；请先在插件设置中勾选「允许跨工作区读取工作记录」。' };
+      }
+      const query = rest.join(' ').trim().toLowerCase();
+      if (!query) return { kind: 'error', text: '用法：/memory cross <关键词>' };
+      const workspaces = await loadOtherWorkspaces('');
+      const hits = [];
+      for (const workspace of workspaces) {
+        for (const record of workspace.records) {
+          const digest = record.digest ?? '';
+          const haystack = `${record.title ?? ''}\n${digest}\n${(record.notes ?? []).map((note) => note.text).join('\n')}`.toLowerCase();
+          if (!haystack.includes(query)) continue;
+          const at = digest.toLowerCase().indexOf(query);
+          const excerpt = at >= 0 ? digest.slice(Math.max(0, at - 150), at + 300) : digest.slice(0, 300);
+          hits.push({ workspace: workspace.cwd, record, excerpt });
+        }
+      }
+      hits.sort((a, b) => (b.record.updatedAt ?? 0) - (a.record.updatedAt ?? 0));
+      if (hits.length === 0) return { kind: 'success', text: `没有在其他工作区找到「${query}」。` };
+      const lines = [`跨工作区检索「${query}」：${hits.length} 条`, ''];
+      for (const hit of hits.slice(0, 5)) {
+        lines.push(`[${hit.workspace} · ${hit.record.id} · ${stamp(hit.record.updatedAt)}]`);
+        lines.push(hit.excerpt);
+        lines.push('');
+      }
+      return { kind: 'success', text: lines.join('\n') };
+    }
+
     const header = invocation.agent?.session?.header ?? {};
     if (typeof header.cwd !== 'string' || header.cwd.length === 0) {
       return { kind: 'error', text: '当前会话没有工作目录，无法使用工作记忆。' };
@@ -1110,6 +1270,8 @@ export function apply(ctx, config) {
         `记录文件：${workspace.file}`,
         `保留策略：${cfg.maxAgeDays} 天 / 最多 ${cfg.maxSessions} 个会话`,
         `压缩策略：每次接入 ${cfg.maxChars} 字以内，接入最近 ${cfg.attachSessions} 个会话`,
+        `跨工作区读取：${cfg.crossWorkspaceEnabled ? '已开启' : '已关闭'}`,
+        `跨工作区自动注入：${cfg.crossWorkspaceAttach ? '已开启' : '已关闭'}（只含工作事实，order ${CROSS_ORDER}）`,
         `交互习惯：${cfg.habitsEnabled ? '已开启' : '已关闭'}（最多保留 2 份）`,
         `习惯文件：${habitPath}`,
         `习惯备份：${previousHabitPath}`,
@@ -1146,6 +1308,10 @@ export function apply(ctx, config) {
         const digest = latest.digest ?? buildDigest(latest, cfg);
         chunks.push(factsSectionText(`### 会话 ${latest.id}（更新于 ${stamp(latest.updatedAt)}）\n${digest}`));
       }
+      if (cfg.crossWorkspaceEnabled && cfg.crossWorkspaceAttach) {
+        const cross = renderCrossWorkspace(await loadOtherWorkspaces(workspace.key));
+        if (cross) chunks.push(cross);
+      }
       return { kind: 'success', text: chunks.length > 0 ? chunks.join('\n\n---\n\n') : '暂无会话记忆。' };
     }
 
@@ -1166,10 +1332,14 @@ export function apply(ctx, config) {
       if (persona) chunks.push(personaSectionText(persona));
       if (habitText) chunks.push(habitsSectionText(habitText));
       if (facts) chunks.push(factsSectionText(facts));
+      if (cfg.crossWorkspaceEnabled && cfg.crossWorkspaceAttach) {
+        const cross = renderCrossWorkspace(await loadOtherWorkspaces(workspace.key));
+        if (cross) chunks.push(cross);
+      }
       return {
         kind: 'success',
         text: chunks.length > 0
-          ? `以下内容将按此顺序注入：身份（${IDENTITY_ORDER}）→ 人格（${PERSONA_ORDER}）→ 交互习惯（${HABITS_ORDER}）→ 会话事实（${FACTS_ORDER}）。\n\n${chunks.join('\n\n---\n\n')}`
+          ? `以下内容将按此顺序注入：身份（${IDENTITY_ORDER}）→ 人格（${PERSONA_ORDER}）→ 交互习惯（${HABITS_ORDER}）→ 会话事实（${FACTS_ORDER}）→ 其他工作区（${CROSS_ORDER}）。\n\n${chunks.join('\n\n---\n\n')}`
           : '当前没有可接入的记忆。',
       };
     }
@@ -1223,8 +1393,8 @@ export function apply(ctx, config) {
   ctx.inject(['commands'], (commandCtx) => {
     commandCtx.effect(() => commandCtx.commands.register({
       name: 'memory',
-      description: '查看、预览或清除本地工作记忆、交互习惯、身份层与人格记忆',
-      input: { hint: '[status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path]|persona [show|versions|clear]]' },
+      description: '查看、预览或清除本地工作记忆、交互习惯、身份层与人格记忆，并可按需读取其他工作区的工作记录',
+      input: { hint: '[status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path]|persona [show|versions|clear]|workspaces|cross <query>]' },
       handler: memoryCommand,
     }));
   });

@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）插件架构
 
-适用版本：**1.2.0**
+适用版本：**1.3.0**
 源码目录：`<repo>`
 配套文档：[USAGE.md](USAGE.md)（怎么用）、[README.md](README.md)（配置速查）
 
@@ -72,7 +72,7 @@ Host 行在 Loader 中的身份：
 │                                                                                  │
 │  agent/created ──► attachIdentity() ──► order 100：身份（INI）                     │
 │     (root agents)  attachPersona()  ──► order 150：人格记忆（current.md）          │
-│                    attachMemory()   ──► order 280 习惯 / 300 事实                  │
+│                    attachMemory()   ──► order 280 习惯 / 300 事实 / 310 其他工作区（可选）│
 │                                                                                  │
 │  tools：persona_save / memory_save / memory_recall   commands：/memory ...         │
 │                                                                                  │
@@ -261,11 +261,12 @@ collectRecords(ws, selfId, includeSelf)
        ├─ 读同 cwd 最近的 records（默认 1 个）
        ├─ 读 habits/.1.txt
        ├─ systemPrompt.section({name:'context-memory:habits', order:280})
-       └─ systemPrompt.section({name:'context-memory:carryover', order:300})
+       ├─ systemPrompt.section({name:'context-memory:carryover', order:300})
+       └─ attachCrossWorkspace()（可选，order:310，只读其他工作区工作事实）
 ```
 
-`renderPrompt` 按 order 拼接：身份 100 → 人格 150 → 习惯 280 → 事实 300。
-`resume` 的旧会话恢复身份 + 人格，不重复接入习惯/事实；子代理不参与。
+`renderPrompt` 按 order 拼接：身份 100 → 人格 150 → 习惯 280 → 事实 300 → 其他工作区 310。
+`resume` 的旧会话恢复身份 + 人格，不重复接入习惯/事实/跨工作区；子代理不参与。
 
 ### 4.8 工具与命令
 
@@ -275,7 +276,9 @@ collectRecords(ws, selfId, includeSelf)
 - `/memory` 命令：status/show/path/preview/clear/habits/identity/persona；
 - `/memory habits on|off`：通过 `ctx.settings.update` 写 profile 配置，失败则只改运行期；
 - `/memory identity [show|path]`：查看解析后的身份层或文件路径；
-- `/memory persona [show|versions|clear]`：查看/列出/清除人格记忆。
+- `/memory persona [show|versions|clear]`：查看/列出/清除人格记忆；
+- `/memory workspaces`：列出其他工作区；`/memory cross <query>`：检索其他工作区工作事实；
+- `memory_recall(scope:'all')`：跨工作区检索，只读工作事实，绝不读取身份/人格。
 
 ---
 

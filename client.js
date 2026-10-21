@@ -31,6 +31,11 @@ window.__ModuleLoader__.load({
       personaHint: 'Global, bounded self/relationship memory: current.md plus versioned iterations. Separate from work memory.',
       personaDefaultPath: 'default ($DSH_HOME/persona)',
       personaDerived: 'Persona: <root>/current.md · versions/',
+      crossTitle: 'Cross-workspace',
+      crossAllow: 'Allow reading other workspaces',
+      crossAllowHint: 'Work facts only. Identity and persona data are never shared.',
+      crossAttach: 'Auto-inject recent records from other workspaces',
+      crossAttachHint: 'Adds a separate section after the current facts; off by default.',
       habitsTitle: 'Interaction habits',
       habits: 'Summarize interaction habits',
       habitsHint: 'Keeps at most two concise txt summaries per workspace and restores habits before facts in the next session.',
@@ -65,6 +70,11 @@ window.__ModuleLoader__.load({
       personaHint: '全局、有上限的自我/关系记忆：current.md 加迭代版本，与工作记忆分开管理。',
       personaDefaultPath: '默认（$DSH_HOME/persona）',
       personaDerived: '人格：<root>/current.md · versions/',
+      crossTitle: '跨工作区',
+      crossAllow: '允许读取其他工作区的工作记录',
+      crossAllowHint: '只共享工作事实；身份与人格数据永远不会被共享。',
+      crossAttach: '自动注入其他工作区的最近记录',
+      crossAttachHint: '在当前事实之后追加独立段落；默认关闭。',
       habitsTitle: '交互习惯',
       habits: '归纳交互习惯',
       habitsHint: '每个工作区最多保留两份简短的 txt 总结；下一个会话会先恢复习惯，再恢复事实。',
@@ -150,11 +160,15 @@ window.__ModuleLoader__.load({
       const storedHabits = value.habitsEnabled !== false;
       const storedIdentity = typeof value.identityFile === 'string' ? value.identityFile : '';
       const storedPersona = typeof value.personaDirectory === 'string' ? value.personaDirectory : '';
+      const storedCross = value.crossWorkspaceEnabled === true;
+      const storedCrossAttach = value.crossWorkspaceAttach === true;
 
       const [directory, setDirectory] = React.useState(storedDirectory);
       const [habits, setHabits] = React.useState(storedHabits);
       const [identityFile, setIdentityFile] = React.useState(storedIdentity);
       const [personaDirectory, setPersonaDirectory] = React.useState(storedPersona);
+      const [cross, setCross] = React.useState(storedCross);
+      const [crossAttach, setCrossAttach] = React.useState(storedCrossAttach);
       const [busy, setBusy] = React.useState(false);
       const [status, setStatus] = React.useState('');
 
@@ -163,12 +177,16 @@ window.__ModuleLoader__.load({
         setHabits(storedHabits);
         setIdentityFile(storedIdentity);
         setPersonaDirectory(storedPersona);
-      }, [storedDirectory, storedHabits, storedIdentity, storedPersona, revision]);
+        setCross(storedCross);
+        setCrossAttach(storedCrossAttach);
+      }, [storedDirectory, storedHabits, storedIdentity, storedPersona, storedCross, storedCrossAttach, revision]);
 
       const dirty = directory !== storedDirectory
         || habits !== storedHabits
         || identityFile !== storedIdentity
-        || personaDirectory !== storedPersona;
+        || personaDirectory !== storedPersona
+        || cross !== storedCross
+        || crossAttach !== storedCrossAttach;
       const disabled = !writable || busy;
       const root = directory.trim().length > 0 ? directory.trim().replace(/[\\/]+$/u, '') : '';
       const personaRoot = personaDirectory.trim().length > 0 ? personaDirectory.trim().replace(/[\\/]+$/u, '') : '';
@@ -180,6 +198,8 @@ window.__ModuleLoader__.load({
         if (habits !== storedHabits) ops.push({ op: 'set', path: ['habitsEnabled'], value: habits });
         if (identityFile !== storedIdentity) ops.push({ op: 'set', path: ['identityFile'], value: identityFile.trim() });
         if (personaDirectory !== storedPersona) ops.push({ op: 'set', path: ['personaDirectory'], value: personaDirectory.trim() });
+        if (cross !== storedCross) ops.push({ op: 'set', path: ['crossWorkspaceEnabled'], value: cross });
+        if (crossAttach !== storedCrossAttach) ops.push({ op: 'set', path: ['crossWorkspaceAttach'], value: crossAttach });
         if (ops.length === 0) return;
         setBusy(true);
         setStatus('');
@@ -283,6 +303,26 @@ window.__ModuleLoader__.load({
             h('p', { style: styles.hint }, t('personaHint')),
             h('div', { style: styles.mono },
               t('personaDerived').replace(/<root>/gu, personaRoot || t('personaDefaultPath'))))),
+        h('section', { style: styles.section },
+          h('h3', { style: styles.heading }, t('crossTitle')),
+          h('label', { style: styles.checkboxRow },
+            h('input', {
+              type: 'checkbox',
+              checked: cross,
+              disabled,
+              onChange: (event) => setCross(event.target.checked),
+            }),
+            h('span', { style: styles.label }, t('crossAllow'))),
+          h('p', { style: styles.hint }, t('crossAllowHint')),
+          h('label', { style: styles.checkboxRow },
+            h('input', {
+              type: 'checkbox',
+              checked: crossAttach,
+              disabled: disabled || !cross,
+              onChange: (event) => setCrossAttach(event.target.checked),
+            }),
+            h('span', { style: styles.label }, t('crossAttach'))),
+          h('p', { style: styles.hint }, t('crossAttachHint'))),
         h('section', { style: styles.section },
           h('h3', { style: styles.heading }, t('habitsTitle')),
           h('label', { style: styles.checkboxRow },

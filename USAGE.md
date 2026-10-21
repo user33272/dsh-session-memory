@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）使用文档
 
-适用版本：**1.2.0**（Windows / macOS / Linux）
+适用版本：**1.3.0**（Windows / macOS / Linux）
 插件包：`dsh-session-memory`
 源码目录：`<repo>`
 
@@ -168,6 +168,27 @@
 
 ---
 
+## 5.6 跨工作区工作记录（可选）
+
+默认关闭。开启 `crossWorkspaceEnabled` 后，可以读取**其他工作区的工作事实**：
+
+- `memory_recall(scope:'all')`：模型检索其他工作区工作事实；
+- `/memory workspaces`：列出其他工作区；
+- `/memory cross <关键词>`：命令行检索其他工作区；
+- `crossWorkspaceAttach` 开启时，新会话在事实之后（order **310**）自动注入最近的其他工作区摘要。
+
+隐私边界：
+
+- 只读取 `<工作存储>/*.json` 中的工作事实；
+- **绝不读取** `identityFile` 或 `<personaDirectory>`；
+- 人格记忆不会复制进工作文件，也不会出现在跨工作区结果里。
+
+工作事实本身可能包含敏感项目内容，默认关闭，请确认后再开启。
+
+上限：`crossWorkspaceMaxChars`（默认 1500）、`crossWorkspaceSessions`（默认 3）。
+
+---
+
 ## 6. 交互习惯（txt 文档）
 
 ### 记录什么
@@ -221,9 +242,10 @@
 1. **身份层**（`identityFile` 已配置时）：order `100`；
 2. **人格记忆**（`personaDirectory/current.md` 存在时）：order `150`；
 3. 该工作区最新的 `.1.txt`：**交互习惯（先读）**，order `280`；
-4. 最近一次事实摘要：**会话事实（后读）**，order `300`。
+4. 最近一次事实摘要：**会话事实（后读）**，order `300`；
+5. 其他工作区工作记录（`crossWorkspaceEnabled` + `crossWorkspaceAttach` 开启时）：order `310`。
 
-实现顺序：身份 100 → 人格 150 → 习惯 280 → 事实 300。
+实现顺序：身份 100 → 人格 150 → 习惯 280 → 事实 300 → 其他工作区 310。
 
 以下情况不会接入：
 
@@ -262,6 +284,8 @@
 | `/memory persona show` | 查看当前人格摘要 |
 | `/memory persona versions` | 列出人格版本 |
 | `/memory persona clear` | 清除人格记忆与版本（不影响身份/工作） |
+| `/memory workspaces` | 列出其他工作区（需开启跨工作区） |
+| `/memory cross <关键词>` | 检索其他工作区的工作事实 |
 
 ### 模型工具
 
@@ -269,7 +293,7 @@
 |---|---|
 | `persona_save(text)` | 写入/迭代人格记忆（≤ `personaMaxChars`，自动版本化） |
 | `memory_save(note, tags?)` | 让模型把项目目标、决策、约定、下一步写入工作记忆 |
-| `memory_recall(query?, limit?)` | 按关键词检索同一工作区的事实记忆 |
+| `memory_recall(query?, limit?, scope?)` | 检索工作记忆；`scope: 'all'` 时跨工作区（只含工作事实） |
 
 `memory_save` 写入的要点会单独保存在事实记录的 `notes` 中，并在下次会话的“已保存的要点”里优先出现。
 
@@ -289,6 +313,10 @@
     personaDirectory: ''   # 人格目录；留空 $DSH_HOME/persona
     personaMaxChars: 1200  # 人格摘要上限
     personaKeepVersions: 5 # 保留最近几个人格版本
+    crossWorkspaceEnabled: false # 允许读取其他工作区工作记录
+    crossWorkspaceAttach: false  # 新会话自动注入其他工作区摘要
+    crossWorkspaceMaxChars: 1500
+    crossWorkspaceSessions: 3
     autoAttach: true       # 新会话自动接入
     maxChars: 3000         # 事实摘要上限
     maxAgeDays: 14         # 记录保留天数
@@ -302,7 +330,7 @@
     habitsMaxChars: 600    # 习惯正文上限
 ```
 
-设置页面会修改 `identityFile`、`personaDirectory`、`directory` 与 `habitsEnabled`，其余字段仍通过配置或命令维护。
+设置页面会修改 `identityFile`、`personaDirectory`、`directory`、`crossWorkspaceEnabled`、`crossWorkspaceAttach` 与 `habitsEnabled`，其余字段仍通过配置或命令维护。
 
 ---
 
@@ -315,7 +343,7 @@
 ### 10.2 页面显示“该 Host 条目未加载，暂时无法配置”
 
 1. 先试 **内置插件配置 → 人格、身份与工作**（入口 B）；
-2. 确认安装的是 **1.2.0** 或更新版本；
+2. 确认安装的是 **1.3.0** 或更新版本；
 3. 安装/升级后需**完全退出并重开 DSH**，刷新页面不够；
 4. 若两个入口仍不可用，请记录当前版本与页面提示，交给维护者排查。
 
@@ -383,6 +411,8 @@
 - 习惯归纳是**规则推断**，不调用模型；它反映统计倾向，不是绝对准确的偏好判断；
 - 习惯是参考，不是指令；与当前用户要求冲突时，以当前要求为准；
 - 事实摘要按时间窗口滚动，超出 `maxChars` 的早期内容会被省略（保留“早期目标”和最近的对话）；
+- 跨工作区只读工作事实，不读取身份/人格；但工作事实本身可能含敏感项目内容，需显式开启；
+- 跨工作区自动注入受 `crossWorkspaceMaxChars` / `crossWorkspaceSessions` 限制；
 - 浏览器端设置页面在安装/升级后需要重启 DSH 才会更新；
 - 更换身份/人格/工作目录都不会迁移旧数据。
 

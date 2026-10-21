@@ -7,7 +7,7 @@
 ├─ 身份层 identity.ini（外部只读）        ├─ <工作区哈希>.json   事实/对话压缩
 ├─ 人格记忆 persona/current.md            └─ habits/            交互习惯 .1/.2.txt
 │  └─ versions/ 迭代版本
-└─ 注入顺序：身份 100 → 人格 150 → 习惯 280 → 事实 300
+└─ 注入顺序：身份 100 → 人格 150 → 习惯 280 → 事实 300 → 其他工作区 310（可选）
 ```
 
 ## 五层记忆
@@ -19,6 +19,7 @@
 | **习惯 habits** | 规则归纳，两份 txt | 工作根目录 | 按工作区 |
 | **情景 episodes** | 每回合压缩的事实 JSON | 工作根目录 | 按工作区 |
 | **工作 working** | 当前会话上下文 | 不持久化 | 会话内 |
+| **跨工作区**（可选） | 其他工作区的**工作事实** | 只读其他 `<工作区哈希>.json` | 按需/自动 |
 
 ## 数据布局
 
@@ -70,6 +71,19 @@
 
 示例见 `examples/persona.example.md`。
 
+## 跨工作区工作记录（可选）
+
+默认关闭。开启 `crossWorkspaceEnabled` 后：
+
+- `memory_recall(scope: 'all')` 可检索其他工作区的工作事实；
+- `/memory workspaces` 列出其他工作区；
+- `/memory cross <query>` 检索其他工作区；
+- `crossWorkspaceAttach` 开启时，新会话在事实之后（order **310**）自动注入最近的其他工作区工作记录。
+
+隐私边界：跨工作区只读取 `<工作存储>/*.json` 中的工作事实，**绝不读取**身份文件或 `<personaDirectory>`；人格记忆不会被复制进工作文件，也不会出现在跨工作区结果里。工作事实本身可能包含项目敏感信息，开启前请确认。
+
+上限：`crossWorkspaceMaxChars`（默认 1500）、`crossWorkspaceSessions`（默认 3）。
+
 ## 恢复顺序
 
 根代理创建时（含 `resume`）：
@@ -77,7 +91,8 @@
 1. **身份**（order 100，若配置）；
 2. **人格记忆**（order 150，若存在）；
 3. **交互习惯**（order 280，仅 `startup` / `clear`）；
-4. **会话事实**（order 300，仅 `startup` / `clear`）。
+4. **会话事实**（order 300，仅 `startup` / `clear`）；
+5. **其他工作区工作记录**（order 310，可选，仅 `startup` / `clear`）。
 
 `resume` 只恢复身份 + 人格；子代理不参与。
 
@@ -88,6 +103,7 @@
 - **身份 INI 文件**：绝对路径；
 - **人格目录**：`current.md` 与 `versions/` 的位置；
 - **工作存储目录**：事实 JSON 与习惯 txt 的位置；
+- **跨工作区**：允许读取其他工作区 / 自动注入；
 - **归纳交互习惯**：开关；
 - **保存**：写入 profile 配置。
 
@@ -102,13 +118,15 @@
 - `/memory clear`：只清该工作区的事实；
 - `/memory habits [show|on|off|clear]`：交互习惯；
 - `/memory identity [show|path]`：身份层；
-- `/memory persona [show|versions|clear]`：人格记忆与版本。
+- `/memory persona [show|versions|clear]`：人格记忆与版本；
+- `/memory workspaces`：列出其他工作区（需开启跨工作区）；
+- `/memory cross <query>`：检索其他工作区的工作事实。
 
 ## 模型工具
 
 - `persona_save(text)`：写入/迭代人格记忆（≤ `personaMaxChars`，自动版本化）；
 - `memory_save(note, tags?)`：写工作记忆要点；
-- `memory_recall(query?, limit?)`：检索工作记忆。
+- `memory_recall(query?, limit?, scope?)`：检索工作记忆；`scope: 'all'` 时跨工作区。
 
 ## 配置
 
@@ -121,6 +139,10 @@
     personaDirectory: ''        # 人格目录；留空 $DSH_HOME/persona
     personaMaxChars: 1200       # 人格摘要上限
     personaKeepVersions: 5      # 保留最近几个版本
+    crossWorkspaceEnabled: false # 允许读取其他工作区工作记录
+    crossWorkspaceAttach: false  # 新会话自动注入其他工作区摘要
+    crossWorkspaceMaxChars: 1500
+    crossWorkspaceSessions: 3
     directory: ''               # 工作存储；留空 $DSH_HOME/context-memory
     autoAttach: true
     maxChars: 3000
@@ -141,4 +163,5 @@
 - 人格记忆是**迭代摘要**，不是完整自传；每次替换必须自己保留仍需的要点。
 - 习惯归纳是规则推断，不调用模型。
 - 人格摘要、事实、习惯都是纯文本，可直接查看/删除。
+- 跨工作区读取只针对**工作事实**，不读取身份/人格；但工作事实本身可能含敏感项目内容，默认关闭，需显式开启。
 - 安装/升级 Client 半后需要重启 DSH；更换目录不迁移旧数据。
