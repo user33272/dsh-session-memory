@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-memory",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Local DeepSeek Harness memory with per-workspace identity and persona isolation, bounded/versioned persona memory, per-workspace work facts, interaction habits, and optional cross-workspace work-memory reading without sharing persona data.",
   "type": "module",
   "exports": {

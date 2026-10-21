@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）插件架构
 
-适用版本：**1.4.0**
+适用版本：**1.4.1**
 源码目录：`<repo>`
 配套文档：[USAGE.md](USAGE.md)（怎么用）、[README.md](README.md)（配置速查）
 
@@ -268,6 +268,8 @@ collectRecords(ws, selfId, includeSelf)
 `renderPrompt` 按 order 拼接：身份 100 → 人格 150 → 习惯 280 → 事实 300 → 其他工作区 310。
 `personaWorkspaceScoped: true` 时，每个 cwd 使用自己的 `identity.ini` 与 `current.md`；某个工作区缺文件就跳过，不回退到模板/其他工作区。
 `resume` 的旧会话恢复当前工作区的身份 + 人格，不重复接入习惯/事实/跨工作区；子代理不参与。
+
+**QQ/其他通道的兜底**：`dsh-onebot` 等通道可能在 `agent/created` 监听器进入作用域之前就创建/恢复了持久 Agent。插件启动时会扫描 `ctx.agents.roots()` 补挂，并在该 session 的 `session/event` 上再次懒补，确保下一轮能看到当前工作区的身份/人格；不依赖 `agent/created` 一定触发。
 
 ### 4.8 工具与命令
 

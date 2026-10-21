@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）使用文档
 
-适用版本：**1.4.0**（Windows / macOS / Linux）
+适用版本：**1.4.1**（Windows / macOS / Linux）
 插件包：`dsh-session-memory`
 源码目录：`<repo>`
 

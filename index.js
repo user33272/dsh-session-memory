@@ -19,7 +19,7 @@ import { identityFromText } from './identity.js';
 import { clearPersona, listPersonaVersions, readPersona, writePersona } from './persona.js';
 
 export const name = 'session-memory';
-export const inject = ['systemPrompt', 'tools', 'sessions'];
+export const inject = ['systemPrompt', 'tools', 'sessions', 'agents'];
 
 const IDENTITY_SECTION = 'context-memory:identity';
 const PERSONA_SECTION = 'context-memory:persona';
@@ -847,6 +847,25 @@ export function apply(ctx, config) {
     rememberSection(`${agent.id}:persona`, dispose);
   }
 
+  const promptReady = new Set();
+
+  async function ensureAgentSections(agent) {
+    if (!agent || promptReady.has(agent.id)) return;
+    const header = agent.session?.header ?? {};
+    if (header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0) {
+      promptReady.add(agent.id);
+      return;
+    }
+    promptReady.add(agent.id);
+    try {
+      await attachIdentity(agent);
+      await attachPersona(agent);
+    } catch (error) {
+      promptReady.delete(agent.id);
+      throw error;
+    }
+  }
+
   async function attachMemory(agent) {
     const header = agent.session?.header ?? {};
     if (typeof header.cwd !== 'string' || header.cwd.length === 0) return;
@@ -897,8 +916,7 @@ export function apply(ctx, config) {
     try {
       const entry = ensureEntry(agent.session, true);
       if (!entry) return;
-      await attachIdentity(agent);
-      await attachPersona(agent);
+      await ensureAgentSections(agent);
       if (cfg.autoAttach && (source === 'startup' || source === 'clear')) await attachMemory(agent);
     } catch (error) {
       report(`初始化会话记忆失败 ${agent?.id}: ${String(error)}`);
@@ -907,6 +925,7 @@ export function apply(ctx, config) {
 
   ctx.on('agent/disposed', ({ agent }) => {
     try {
+      promptReady.delete(agent.id);
       for (const key of [`${agent.id}:identity`, `${agent.id}:persona`, `${agent.id}:habits`, `${agent.id}:facts`, `${agent.id}:cross`]) {
         const dispose = sectionDisposers.get(key);
         if (dispose) {
@@ -934,6 +953,15 @@ export function apply(ctx, config) {
       if (disposed) return;
       const entry = ensureEntry(session);
       if (!entry) return;
+      // QQ/other channel agents may be created before this plugin's
+      // agent/created listener is in scope. Lazily attach identity/persona
+      // from the session's live agent so the next turn sees them.
+      const agent = ctx.agents?.get?.(session.id);
+      if (agent) {
+        void ensureAgentSections(agent).catch((error) => {
+          report(`补挂人格失败 ${session.id}: ${String(error)}`);
+        });
+      }
       ingest(entry, event);
       if (event.type === 'turn/end') void saveEntry(entry);
     } catch (error) {
@@ -1466,6 +1494,18 @@ export function apply(ctx, config) {
 
   // Seed sessions that were already live when this plugin mounted (first install
   // or HMR reload), so their current conversation is captured at the next turn.
+  // Also repair agents created before this plugin was in their scope (notably
+  // persistent QQ agents resumed by dsh-onebot): agent/created may have fired
+  // before this listener existed.
+  try {
+    for (const agent of ctx.agents.roots()) {
+      void ensureAgentSections(agent).catch((error) => {
+        report(`初始化已有代理人格失败 ${agent?.id}: ${String(error)}`);
+      });
+    }
+  } catch (error) {
+    report(`扫描已有代理失败: ${String(error)}`);
+  }
   try {
     for (const session of ctx.sessions.list()) {
       const entry = ensureEntry(session, true);
