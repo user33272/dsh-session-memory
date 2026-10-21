@@ -3,9 +3,10 @@
 本地跨会话记忆插件，按**人格数据**与**工作数据**分开存储、独立管理：
 
 ```
-人格数据（全局）                         工作数据（按工作区）
-├─ 身份层 identity.ini（外部只读）        ├─ <工作区哈希>.json   事实/对话压缩
-├─ 人格记忆 persona/current.md            └─ habits/            交互习惯 .1/.2.txt
+人格数据（按工作区隔离）                    工作数据（按工作区）
+├─ <personaDir>/workspaces/<key>/           ├─ <工作区哈希>.json   事实/对话压缩
+│  ├─ identity.ini（由模板导入）            └─ habits/            交互习惯 .1/.2.txt
+│  ├─ current.md
 │  └─ versions/ 迭代版本
 └─ 注入顺序：身份 100 → 人格 150 → 习惯 280 → 事实 300 → 其他工作区 310（可选）
 ```
@@ -14,8 +15,8 @@
 
 | 层 | 来源 | 存储 | 生命周期 |
 |---|---|---|---|
-| **身份 identity** | `identityFile` 指向的 INI | 外部只读 | 全局、稳定 |
-| **人格 persona** | `personaDirectory/current.md` | 版本化、有上限 | 全局、迭代 |
+| **身份 identity** | `identityFile` 模板导入 | 每工作区 `identity.ini` | 按工作区、稳定 |
+| **人格 persona** | `workspaces/<key>/current.md` | 版本化、有上限 | 按工作区、迭代 |
 | **习惯 habits** | 规则归纳，两份 txt | 工作根目录 | 按工作区 |
 | **情景 episodes** | 每回合压缩的事实 JSON | 工作根目录 | 按工作区 |
 | **工作 working** | 当前会话上下文 | 不持久化 | 会话内 |
@@ -24,10 +25,13 @@
 ## 数据布局
 
 ```
-<身份文件>                         # 任意路径的 INI，由 identityFile 指定
+<身份模板>                         # 任意路径的 INI，由 identityFile 指定；只作为导入模板
 <人格目录>/                        # 默认 $DSH_HOME/persona
-  current.md                       # 当前人格/关系摘要（≤ personaMaxChars）
-  versions/                        # 迭代版本，保留最近 personaKeepVersions 个
+  workspaces/
+    <工作区哈希>/
+      identity.ini                 # 该工作区独立身份（由模板导入；可不同）
+      current.md                   # 该工作区人格/关系摘要（≤ personaMaxChars）
+      versions/                    # 该工作区迭代版本，保留最近 personaKeepVersions 个
 <工作存储>/                        # 默认 $DSH_HOME/context-memory
   <工作区哈希>.json                # 事实/对话压缩（每个工作区一个）
   habits/
@@ -36,14 +40,20 @@
 ```
 
 - 人格数据与工作数据**路径分离、命令分离、清除分离**；
+- 每个工作区有独立身份与人格；某工作区没有 `identity.ini`/`current.md` 就不注入，**不会回退到其他工作区**；
 - 人格摘要用 `persona_save` 整体替换，超过 `personaMaxChars` 会被拒绝；旧版本自动保留；
-- 习惯只在内容变化时轮换：新内容写 `.1.txt`，原 `.1.txt` 覆盖 `.2.txt`；
-- 身份文件只读，插件不复制、不改写。
+- 身份模板不自动复制到新工作区；需要时用 `/memory identity import`。
 
 ## 身份层（INI，order 100）
 
-`identityFile` 为空时关闭。配置后每次新会话/resume 读取并解析：
+`identityFile` 是**模板**路径。按工作区隔离时，插件只读取：
 
+```
+<人格目录>/workspaces/<工作区哈希>/identity.ini
+```
+
+- 模板不会被自动复制到其他工作区；当前工作区可用 `/memory identity import` 导入；
+- 某工作区没有 `identity.ini` 时，身份层跳过，不回退到模板；
 - 只解析 `[section]` + `key = value`；忽略 `#` / `;` 注释；
 - `[raw]` 不参与注入；`[meta]` 只读 `version` / `updated`；
 - 渲染上限 `identityMaxChars`（默认 1200）。
@@ -54,12 +64,12 @@
 
 人格记忆是**自我认知与关系**的迭代摘要，不写项目事实。
 
-- 文件：`<人格目录>/current.md`；
+- 文件：`<人格目录>/workspaces/<工作区哈希>/current.md`；
 - 注入：`context-memory:persona`，order 150，位于身份之后、习惯之前；
-- 更新：模型调用 `persona_save(text)`，或手动编辑 `current.md`；
+- 更新：模型调用 `persona_save(text)`，或手动编辑当前工作区的 `current.md`；
 - 上限：`personaMaxChars`（默认 1200）；超过直接拒绝，要求先压缩；
 - 版本：每次写入生成 `versions/<ISO>.md`，只保留最近 `personaKeepVersions`（默认 5）个；
-- 清除：`/memory persona clear` 只清人格记忆，不影响身份/工作数据。
+- 清除：`/memory persona clear` 只清**当前工作区**的人格记忆，不影响其他工作区、身份或工作数据。
 
 推荐内容：
 
@@ -103,8 +113,9 @@
 
 **Plugins → Session Memory → 行内 Configure**（或 **内置插件配置**）页面：
 
-- **身份 INI 文件**：绝对路径；
-- **人格目录**：`current.md` 与 `versions/` 的位置；
+- **身份 INI 模板**：导入来源，不会自动共享；
+- **人格按工作区隔离**：勾选后每个工作区独立 `identity.ini` + `current.md`；
+- **人格目录**：`workspaces/<工作区哈希>/` 的位置；
 - **工作存储目录**：事实 JSON 与习惯 txt 的位置；
 - **跨工作区**：允许读取其他工作区 / 自动注入 / **选择工作区…**（多选窗口）；
 - **归纳交互习惯**：开关；
@@ -120,8 +131,8 @@
 - `/memory path`：工作记录文件路径；
 - `/memory clear`：只清该工作区的事实；
 - `/memory habits [show|on|off|clear]`：交互习惯；
-- `/memory identity [show|path]`：身份层；
-- `/memory persona [show|versions|clear]`：人格记忆与版本；
+- `/memory identity [show|path|import]`：身份层；`import` 把模板复制到当前工作区；
+- `/memory persona [show|versions|clear]`：当前工作区的人格记忆与版本；
 - `/memory workspaces`：列出其他工作区（需开启跨工作区）；
 - `/memory cross <query>`：检索其他工作区的工作事实。
 
@@ -137,9 +148,10 @@
 - id: session-memory
   name: 'dsh-session-memory'
   config:
-    identityFile: ''            # 身份 INI 绝对路径；留空关闭
+    identityFile: ''            # 身份 INI 模板绝对路径
     identityMaxChars: 1200
     personaDirectory: ''        # 人格目录；留空 $DSH_HOME/persona
+    personaWorkspaceScoped: true # 每个工作区独立身份 + 人格
     personaMaxChars: 1200       # 人格摘要上限
     personaKeepVersions: 5      # 保留最近几个版本
     crossWorkspaceEnabled: false # 允许读取其他工作区工作记录
@@ -164,6 +176,7 @@
 ## 说明与限制
 
 - 身份/人格是稳定设定，不覆盖安全、诚实和工具规则；也不允许编造文件之外的事实。
+- 默认按工作区隔离身份与人格；某工作区没有文件就不注入，不会回退到其他工作区。
 - 人格记忆是**迭代摘要**，不是完整自传；每次替换必须自己保留仍需的要点。
 - 习惯归纳是规则推断，不调用模型。
 - 人格摘要、事实、习惯都是纯文本，可直接查看/删除。

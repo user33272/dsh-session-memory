@@ -13,7 +13,7 @@
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join, basename, resolve } from 'node:path';
+import { join, basename, dirname, resolve } from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { identityFromText } from './identity.js';
 import { clearPersona, listPersonaVersions, readPersona, writePersona } from './persona.js';
@@ -33,7 +33,7 @@ const CROSS_ORDER = 310;
 const HABITS_ORDER = 280;
 const FORMAT_VERSION = 1;
 const DAY_MS = 86_400_000;
-const USAGE = '/memory [status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path]|persona [show|versions|clear]|workspaces|cross <query>]';
+const USAGE = '/memory [status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path|import]|persona [show|versions|clear]|workspaces|cross <query>]';
 
 export const Config = z.object({
   directory: z.string().default(''),
@@ -51,6 +51,7 @@ export const Config = z.object({
   identityFile: z.string().default(''),
   identityMaxChars: z.number().min(200).max(3000).default(1200),
   personaDirectory: z.string().default(''),
+  personaWorkspaceScoped: z.boolean().default(true),
   personaMaxChars: z.number().min(200).max(4000).default(1200),
   personaKeepVersions: z.number().min(1).max(20).default(5),
   crossWorkspaceEnabled: z.boolean().default(false),
@@ -99,6 +100,7 @@ function readConfig(raw) {
     personaDirectory: typeof source.personaDirectory === 'string' && source.personaDirectory.trim().length > 0
       ? resolve(source.personaDirectory.trim())
       : join(home, 'persona'),
+    personaWorkspaceScoped: source.personaWorkspaceScoped !== false,
     personaMaxChars: clampInt(source.personaMaxChars, 1200, 200, 4000),
     personaKeepVersions: clampInt(source.personaKeepVersions, 5, 1, 20),
     crossWorkspaceEnabled: source.crossWorkspaceEnabled === true,
@@ -768,13 +770,26 @@ export function apply(ctx, config) {
     sectionDisposers.set(key, dispose);
   }
 
-  async function readIdentity() {
-    if (!cfg.identityFile) return '';
+  function personaRootFor(cwd) {
+    if (!cfg.personaWorkspaceScoped) return cfg.personaDirectory;
+    if (typeof cwd !== 'string' || cwd.length === 0) return '';
+    return join(cfg.personaDirectory, 'workspaces', workspaceKey(cwd));
+  }
+
+  function identityFileFor(cwd) {
+    if (!cfg.personaWorkspaceScoped) return cfg.identityFile;
+    const root = personaRootFor(cwd);
+    return root ? join(root, 'identity.ini') : '';
+  }
+
+  async function readIdentity(file) {
+    const target = file ?? cfg.identityFile;
+    if (!target) return '';
     try {
-      const text = await readFile(cfg.identityFile, 'utf8');
+      const text = await readFile(target, 'utf8');
       return identityFromText(text, cfg.identityMaxChars);
     } catch (error) {
-      report(`读取身份文件失败 ${cfg.identityFile}: ${String(error)}`);
+      if (error?.code !== 'ENOENT') report(`读取身份文件失败 ${target}: ${String(error)}`);
       return '';
     }
   }
@@ -782,7 +797,10 @@ export function apply(ctx, config) {
   async function attachIdentity(agent) {
     const systemPrompt = agent.ctx?.systemPrompt;
     if (!systemPrompt) return;
-    const identity = await readIdentity();
+    const cwd = agent.session?.header?.cwd;
+    const file = identityFileFor(cwd);
+    if (!file) return;
+    const identity = await readIdentity(file);
     if (identity.length === 0) return;
     const dispose = systemPrompt.section({
       name: IDENTITY_SECTION,
@@ -793,11 +811,12 @@ export function apply(ctx, config) {
     rememberSection(`${agent.id}:identity`, dispose);
   }
 
-  async function readPersonaText() {
+  async function readPersonaText(root) {
+    const target = root ?? cfg.personaDirectory;
     try {
-      return await readPersona(cfg.personaDirectory);
+      return await readPersona(target);
     } catch (error) {
-      report(`读取人格记忆失败 ${cfg.personaDirectory}: ${String(error)}`);
+      report(`读取人格记忆失败 ${target}: ${String(error)}`);
       return '';
     }
   }
@@ -805,7 +824,7 @@ export function apply(ctx, config) {
   function personaSectionText(text) {
     return [
       '## 人格记忆（常驻）',
-      `这是你当前的人格与关系摘要，不是项目事实。需要更新时，用 persona_save 写一份不超过 ${cfg.personaMaxChars} 字的替换版本；旧版本保存在 persona/versions。`,
+      `这是你当前的人格与关系摘要，不是项目事实。需要更新时，用 persona_save 写一份不超过 ${cfg.personaMaxChars} 字的替换版本；旧版本保存在人格目录的 versions 子目录。`,
       '',
       text,
     ].join('\n');
@@ -814,7 +833,10 @@ export function apply(ctx, config) {
   async function attachPersona(agent) {
     const systemPrompt = agent.ctx?.systemPrompt;
     if (!systemPrompt) return;
-    const text = await readPersonaText();
+    const cwd = agent.session?.header?.cwd;
+    const root = personaRootFor(cwd);
+    if (!root) return;
+    const text = await readPersonaText(root);
     if (text.length === 0) return;
     const dispose = systemPrompt.section({
       name: PERSONA_SECTION,
@@ -1075,7 +1097,7 @@ export function apply(ctx, config) {
 
   ctx.tools.register({
     name: 'persona_save',
-    description: `用一份不超过 ${cfg.personaMaxChars} 字的摘要替换「人格/关系记忆」。只写长期自我认知与和 li 的关系（称呼、约定、边界、重要变化），不要写项目事实、任务进度或文件路径；旧版本会保留在 persona/versions/。`,
+    description: `用一份不超过 ${cfg.personaMaxChars} 字的摘要替换「当前工作区的人格/关系记忆」。只写长期自我认知与和 li 的关系（称呼、约定、边界、重要变化），不要写项目事实、任务进度或文件路径；旧版本会保留。`,
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1111,8 +1133,10 @@ export function apply(ctx, config) {
       if (header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0) {
         throw new Error('子代理不写入人格记忆');
       }
+      const root = personaRootFor(header.cwd);
+      if (!root) throw new Error('人格按工作区隔离时需要所属会话的工作目录');
       const text = typeof args?.text === 'string' ? args.text : '';
-      const result = await writePersona(cfg.personaDirectory, text, {
+      const result = await writePersona(root, text, {
         maxChars: cfg.personaMaxChars,
         keepVersions: cfg.personaKeepVersions,
       });
@@ -1138,44 +1162,69 @@ export function apply(ctx, config) {
   async function memoryCommand(invocation) {
     const sub = String(invocation.rawInput ?? '').trim();
     const [head, ...rest] = sub.split(/\s+/u).filter(Boolean);
+    const header = invocation.agent?.session?.header ?? {};
+    const cwd = typeof header.cwd === 'string' ? header.cwd : '';
 
     if (head === 'identity') {
       const action = rest[0] ?? 'show';
+      const file = identityFileFor(cwd);
       if (action === 'path') {
-        return { kind: 'success', text: cfg.identityFile || '未设置身份文件（身份层关闭）。' };
+        return {
+          kind: 'success',
+          text: file || '当前工作区没有独立身份文件；使用 /memory identity import 导入模板，或关闭人格按工作区隔离。',
+        };
+      }
+      if (action === 'import') {
+        if (!cfg.personaWorkspaceScoped) {
+          return { kind: 'error', text: '当前是全局人格模式，不需要导入；直接使用 identityFile 即可。' };
+        }
+        if (!file) return { kind: 'error', text: '当前会话没有工作目录，无法导入身份文件。' };
+        if (!cfg.identityFile) return { kind: 'error', text: '未配置身份模板 identityFile，无法导入。' };
+        try {
+          const source = await readFile(cfg.identityFile, 'utf8');
+          await mkdir(dirname(file), { recursive: true });
+          await writeFile(file, source, 'utf8');
+          return { kind: 'success', text: `已导入身份模板到当前工作区：${file}` };
+        } catch (error) {
+          return { kind: 'error', text: `导入身份文件失败：${String(error)}` };
+        }
       }
       if (action === 'show') {
-        const identity = await readIdentity();
+        const identity = await readIdentity(file);
         if (identity) {
           return {
             kind: 'success',
-            text: `身份层（order ${IDENTITY_ORDER}）\n文件：${cfg.identityFile}\n\n${identity}`,
+            text: `身份层（order ${IDENTITY_ORDER}）\n文件：${file}\n\n${identity}`,
           };
         }
         return {
           kind: 'success',
-          text: cfg.identityFile
-            ? `身份文件已配置，但没有解析到有效内容：${cfg.identityFile}`
-            : '未配置身份文件。可在插件设置页填写 identityFile，或在 profile 配置中设置。',
+          text: cfg.personaWorkspaceScoped
+            ? `当前工作区尚未导入身份文件：${file || '(无工作目录)'}\n使用 /memory identity import 从模板复制。`
+            : (cfg.identityFile
+              ? `身份文件已配置，但没有解析到有效内容：${cfg.identityFile}`
+              : '未配置身份文件。可在插件设置页填写 identityFile，或在 profile 配置中设置。'),
         };
       }
-      return { kind: 'error', text: `未知参数「${action}」。用法：/memory identity [show|path]` };
+      return { kind: 'error', text: `未知参数「${action}」。用法：/memory identity [show|path|import]` };
     }
 
     if (head === 'persona') {
       const action = rest[0] ?? 'status';
-      const current = await readPersonaText();
-      const versions = await listPersonaVersions(cfg.personaDirectory);
+      const root = personaRootFor(cwd);
+      if (!root) return { kind: 'error', text: '人格按工作区隔离时需要当前会话的工作目录。' };
+      const current = await readPersonaText(root);
+      const versions = await listPersonaVersions(root);
       if (action === 'status') {
         return {
           kind: 'success',
           text: [
-            '人格记忆（全局，独立于工作记忆）',
-            `人格目录：${cfg.personaDirectory}`,
-            `当前摘要：${join(cfg.personaDirectory, 'current.md')}`,
+            `人格记忆（${cfg.personaWorkspaceScoped ? '按工作区隔离' : '全局'}）`,
+            `人格目录：${root}`,
+            `当前摘要：${join(root, 'current.md')}`,
             `大小：${current.length}/${cfg.personaMaxChars} 字`,
             `版本数：${versions.length}（保留最近 ${cfg.personaKeepVersions} 个）`,
-            `身份文件：${cfg.identityFile || '未设置'}`,
+            `身份文件：${identityFileFor(cwd) || '未设置'}`,
             '',
             current ? `摘要预览：${clip(current.replace(/\n/gu, ' '), 300)}` : '尚未创建；可用 persona_save 写入。',
             '',
@@ -1187,8 +1236,8 @@ export function apply(ctx, config) {
         return {
           kind: 'success',
           text: current
-            ? `人格记忆（${current.length}/${cfg.personaMaxChars} 字）\n目录：${cfg.personaDirectory}\n\n${current}`
-            : '尚无当前人格摘要。用 persona_save 写入，或手动创建 persona/current.md。',
+            ? `人格记忆（${current.length}/${cfg.personaMaxChars} 字）\n目录：${root}\n\n${current}`
+            : '尚无当前工作区的人格摘要。用 persona_save 写入。',
         };
       }
       if (action === 'versions') {
@@ -1200,8 +1249,8 @@ export function apply(ctx, config) {
         };
       }
       if (action === 'clear') {
-        await clearPersona(cfg.personaDirectory);
-        return { kind: 'success', text: '已清除人格记忆（current + versions）。身份文件未受影响。' };
+        await clearPersona(root);
+        return { kind: 'success', text: '已清除当前工作区的人格记忆（current + versions）。身份文件未受影响。' };
       }
       return { kind: 'error', text: `未知参数「${action}」。用法：/memory persona [show|versions|clear]` };
     }
@@ -1255,7 +1304,6 @@ export function apply(ctx, config) {
       return { kind: 'success', text: lines.join('\n') };
     }
 
-    const header = invocation.agent?.session?.header ?? {};
     if (typeof header.cwd !== 'string' || header.cwd.length === 0) {
       return { kind: 'error', text: '当前会话没有工作目录，无法使用工作记忆。' };
     }
@@ -1266,14 +1314,18 @@ export function apply(ctx, config) {
     if (!head || head === 'status') {
       const all = collectRecords(workspace, invocation.agent.id, true);
       const habitText = cfg.habitsEnabled ? await readHabitFile(header.cwd) : '';
-      const identity = await readIdentity();
-      const persona = await readPersonaText();
-      const personaVersions = await listPersonaVersions(cfg.personaDirectory);
+      const personaRoot = personaRootFor(header.cwd);
+      const identityPath = identityFileFor(header.cwd);
+      const identity = await readIdentity(identityPath);
+      const persona = personaRoot ? await readPersonaText(personaRoot) : '';
+      const personaVersions = personaRoot ? await listPersonaVersions(personaRoot) : [];
       const lines = [
         '会话记忆与人格（本地）',
-        `身份文件：${cfg.identityFile || '未设置（关闭）'}`,
+        `人格隔离：${cfg.personaWorkspaceScoped ? '按工作区（每个任务区独立）' : '全局（所有任务区共享）'}`,
+        `身份文件：${identityPath || '未设置（该工作区无身份）'}`,
+        `身份模板：${cfg.identityFile || '未设置（/memory identity import 不可用）'}`,
         `身份层：${identity ? `已启用（${identity.length} 字，order ${IDENTITY_ORDER}）` : '未启用'}`,
-        `人格目录：${cfg.personaDirectory}`,
+        `人格目录：${personaRoot || '未设置'}`,
         `人格摘要：${persona ? `${persona.length}/${cfg.personaMaxChars} 字` : '未创建'}`,
         `人格版本：${personaVersions.length}（保留最近 ${cfg.personaKeepVersions} 个）`,
         `工作目录：${resolve(header.cwd)}`,
@@ -1309,8 +1361,9 @@ export function apply(ctx, config) {
       const all = collectRecords(workspace, invocation.agent.id, true);
       const latest = all[0];
       const habitText = cfg.habitsEnabled ? await readHabitFile(header.cwd) : '';
-      const identity = await readIdentity();
-      const persona = await readPersonaText();
+      const personaRoot = personaRootFor(header.cwd);
+      const identity = await readIdentity(identityFileFor(header.cwd));
+      const persona = personaRoot ? await readPersonaText(personaRoot) : '';
       const chunks = [];
       if (identity) chunks.push(identity);
       if (persona) chunks.push(personaSectionText(persona));
@@ -1336,8 +1389,9 @@ export function apply(ctx, config) {
         .slice(0, cfg.attachSessions);
       const facts = renderFacts(all);
       const habitText = cfg.habitsEnabled ? await readHabitFile(header.cwd) : '';
-      const identity = await readIdentity();
-      const persona = await readPersonaText();
+      const personaRoot = personaRootFor(header.cwd);
+      const identity = await readIdentity(identityFileFor(header.cwd));
+      const persona = personaRoot ? await readPersonaText(personaRoot) : '';
       const chunks = [];
       if (identity) chunks.push(identity);
       if (persona) chunks.push(personaSectionText(persona));
@@ -1405,7 +1459,7 @@ export function apply(ctx, config) {
     commandCtx.effect(() => commandCtx.commands.register({
       name: 'memory',
       description: '查看、预览或清除本地工作记忆、交互习惯、身份层与人格记忆，并可按需读取其他工作区的工作记录',
-      input: { hint: '[status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path]|persona [show|versions|clear]|workspaces|cross <query>]' },
+      input: { hint: '[status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path|import]|persona [show|versions|clear]|workspaces|cross <query>]' },
       handler: memoryCommand,
     }));
   });

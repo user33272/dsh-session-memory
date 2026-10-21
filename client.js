@@ -24,13 +24,16 @@ window.__ModuleLoader__.load({
       migration: 'Changing the directory affects only data written afterwards. Existing files are not moved automatically.',
       identityTitle: 'Identity',
       identityFile: 'Identity INI file',
-      identityHint: 'Optional. An INI persona charter, injected before persona memory, habits, and facts. Leave blank to disable it.',
+      identityHint: 'Optional INI template. In workspace-scoped mode, use /memory identity import to copy it into the current workspace; other workspaces start empty.',
       identityPlaceholder: 'D:\\path\\to\\persona.zh-cn.ini',
       personaTitle: 'Persona memory',
+      personaScoped: 'Isolate persona per workspace',
+      personaScopedHint: 'Each workspace gets its own identity.ini and current.md. The identity file above is only an import template; other workspaces start empty.',
       personaDirectory: 'Persona directory',
-      personaHint: 'Global, bounded self/relationship memory: current.md plus versioned iterations. Separate from work memory.',
+      personaHint: 'Bounded self/relationship memory. In workspace-scoped mode, each workspace has its own current.md and versions.',
       personaDefaultPath: 'default ($DSH_HOME/persona)',
-      personaDerived: 'Persona: <root>/current.md · versions/',
+      personaDerived: 'Persona: <root>/workspaces/<workspaceKey>/current.md · versions/',
+      personaDerivedGlobal: 'Persona: <root>/current.md · versions/',
       crossTitle: 'Cross-workspace',
       crossAllow: 'Allow reading other workspaces',
       crossAllowHint: 'Work facts only. Identity and persona data are never shared.',
@@ -76,13 +79,16 @@ window.__ModuleLoader__.load({
       migration: '更改目录只影响之后写入的数据，旧目录中的文件不会自动迁移。',
       identityTitle: '身份层',
       identityFile: '身份 INI 文件',
-      identityHint: '可选。INI 人格设定，会在人格记忆、交互习惯和会话事实之前注入；留空关闭身份层。',
+      identityHint: '可选。INI 人格模板；按工作区隔离时，用 /memory identity import 复制到当前工作区，其他工作区从空白开始。',
       identityPlaceholder: 'D:\\path\\to\\persona.zh-cn.ini',
       personaTitle: '人格记忆',
+      personaScoped: '人格按工作区隔离',
+      personaScopedHint: '每个工作区独立 identity.ini 与 current.md；上面的身份文件只作为导入模板，其他工作区从空白开始。',
       personaDirectory: '人格目录',
-      personaHint: '全局、有上限的自我/关系记忆：current.md 加迭代版本，与工作记忆分开管理。',
+      personaHint: '有上限的自我/关系记忆；按工作区隔离时，每个工作区各自的 current.md 与版本。',
       personaDefaultPath: '默认（$DSH_HOME/persona）',
-      personaDerived: '人格：<root>/current.md · versions/',
+      personaDerived: '人格：<root>/workspaces/<工作区哈希>/current.md · versions/',
+      personaDerivedGlobal: '人格：<root>/current.md · versions/',
       crossTitle: '跨工作区',
       crossAllow: '允许读取其他工作区的工作记录',
       crossAllowHint: '只共享工作事实；身份与人格数据永远不会被共享。',
@@ -344,6 +350,7 @@ window.__ModuleLoader__.load({
       const storedHabits = value.habitsEnabled !== false;
       const storedIdentity = typeof value.identityFile === 'string' ? value.identityFile : '';
       const storedPersona = typeof value.personaDirectory === 'string' ? value.personaDirectory : '';
+      const storedScoped = value.personaWorkspaceScoped !== false;
       const storedCross = value.crossWorkspaceEnabled === true;
       const storedCrossAttach = value.crossWorkspaceAttach === true;
       const storedAllowlist = Array.isArray(value.crossWorkspaceAllowlist)
@@ -354,6 +361,7 @@ window.__ModuleLoader__.load({
       const [habits, setHabits] = React.useState(storedHabits);
       const [identityFile, setIdentityFile] = React.useState(storedIdentity);
       const [personaDirectory, setPersonaDirectory] = React.useState(storedPersona);
+      const [personaScoped, setPersonaScoped] = React.useState(storedScoped);
       const [cross, setCross] = React.useState(storedCross);
       const [crossAttach, setCrossAttach] = React.useState(storedCrossAttach);
       const [allowlist, setAllowlist] = React.useState(storedAllowlist);
@@ -366,15 +374,17 @@ window.__ModuleLoader__.load({
         setHabits(storedHabits);
         setIdentityFile(storedIdentity);
         setPersonaDirectory(storedPersona);
+        setPersonaScoped(storedScoped);
         setCross(storedCross);
         setCrossAttach(storedCrossAttach);
         setAllowlist(storedAllowlist);
-      }, [storedDirectory, storedHabits, storedIdentity, storedPersona, storedCross, storedCrossAttach, JSON.stringify(storedAllowlist), revision]);
+      }, [storedDirectory, storedHabits, storedIdentity, storedPersona, storedScoped, storedCross, storedCrossAttach, JSON.stringify(storedAllowlist), revision]);
 
       const dirty = directory !== storedDirectory
         || habits !== storedHabits
         || identityFile !== storedIdentity
         || personaDirectory !== storedPersona
+        || personaScoped !== storedScoped
         || cross !== storedCross
         || crossAttach !== storedCrossAttach
         || allowlist.join('\n') !== storedAllowlist.join('\n');
@@ -389,6 +399,7 @@ window.__ModuleLoader__.load({
         if (habits !== storedHabits) ops.push({ op: 'set', path: ['habitsEnabled'], value: habits });
         if (identityFile !== storedIdentity) ops.push({ op: 'set', path: ['identityFile'], value: identityFile.trim() });
         if (personaDirectory !== storedPersona) ops.push({ op: 'set', path: ['personaDirectory'], value: personaDirectory.trim() });
+        if (personaScoped !== storedScoped) ops.push({ op: 'set', path: ['personaWorkspaceScoped'], value: personaScoped });
         if (cross !== storedCross) ops.push({ op: 'set', path: ['crossWorkspaceEnabled'], value: cross });
         if (crossAttach !== storedCrossAttach) ops.push({ op: 'set', path: ['crossWorkspaceAttach'], value: crossAttach });
         if (allowlist.join('\n') !== storedAllowlist.join('\n')) ops.push({ op: 'set', path: ['crossWorkspaceAllowlist'], value: allowlist });
@@ -472,6 +483,15 @@ window.__ModuleLoader__.load({
             h('p', { style: styles.hint }, t('identityHint')))),
         h('section', { style: styles.section },
           h('h3', { style: styles.heading }, t('personaTitle')),
+          h('label', { style: styles.checkboxRow },
+            h('input', {
+              type: 'checkbox',
+              checked: personaScoped,
+              disabled,
+              onChange: (event) => setPersonaScoped(event.target.checked),
+            }),
+            h('span', { style: styles.label }, t('personaScoped'))),
+          h('p', { style: styles.hint }, t('personaScopedHint')),
           h('div', { style: styles.field },
             h('label', { style: styles.label, htmlFor: 'session-memory-persona' }, t('personaDirectory')),
             h('input', {
@@ -494,7 +514,7 @@ window.__ModuleLoader__.load({
               }, t('reset'))),
             h('p', { style: styles.hint }, t('personaHint')),
             h('div', { style: styles.mono },
-              t('personaDerived').replace(/<root>/gu, personaRoot || t('personaDefaultPath'))))),
+              t(personaScoped ? 'personaDerived' : 'personaDerivedGlobal').replace(/<root>/gu, personaRoot || t('personaDefaultPath'))))),
         h('section', { style: styles.section },
           h('h3', { style: styles.heading }, t('crossTitle')),
           h('label', { style: styles.checkboxRow },

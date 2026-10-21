@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）插件架构
 
-适用版本：**1.3.2**
+适用版本：**1.4.0**
 源码目录：`<repo>`
 配套文档：[USAGE.md](USAGE.md)（怎么用）、[README.md](README.md)（配置速查）
 
@@ -10,8 +10,8 @@
 
 这是一个 **Cordis 双半插件**：
 
-- **Host 半**（Node）负责记录会话、压缩事实、归纳习惯、读取身份 INI、管理有上限的人格记忆、写本地文件、在下一个会话注入 system prompt；
-- **Client 半**（浏览器）只负责在 Plugins 页面渲染设置表单，把「身份文件 / 人格目录 / 工作目录 / 习惯开关」写回 profile 配置。
+- **Host 半**（Node）负责记录会话、压缩事实、归纳习惯、按工作区读取身份 INI、管理有上限的人格记忆、写本地文件、在下一个会话注入 system prompt；
+- **Client 半**（浏览器）只负责在 Plugins 页面渲染设置表单，把「身份模板 / 人格隔离 / 人格目录 / 工作目录 / 习惯开关」写回 profile 配置。
 
 两者通过 **同一个包名** `dsh-session-memory` 绑定：`package.json` 的 `dsh.bundle.patch` 挂 Host 行，`dsh.client` 挂浏览器模块。
 
@@ -42,7 +42,7 @@
 ```
 <DSH_HOME>\profiles\<profile>\
   node_modules\dsh-session-memory\      # 打包安装后的真实目录
-  cordis.patch.yml                      # 可能写入 identityFile / personaDirectory / directory / habitsEnabled 覆盖
+  cordis.patch.yml                      # 可能写入 identityFile / personaWorkspaceScoped / personaDirectory / directory / habitsEnabled 覆盖
 ```
 
 Host 行在 Loader 中的身份：
@@ -251,11 +251,11 @@ collectRecords(ws, selfId, includeSelf)
 ```
 根代理 agent/created
   ├─ attachIdentity()（所有根代理，含 resume）
-  │    ├─ readFile(identityFile)
+  │    ├─ identityFileFor(cwd) → <persona>/workspaces/<key>/identity.ini
   │    ├─ identityFromText(text, identityMaxChars)
   │    └─ systemPrompt.section({name:'context-memory:identity', order:100})
   ├─ attachPersona()（所有根代理，含 resume）
-  │    ├─ readPersona(personaDirectory) → current.md
+  │    ├─ readPersona(personaRootFor(cwd)) → current.md
   │    └─ systemPrompt.section({name:'context-memory:persona', order:150})
   └─ attachMemory()（仅 startup / clear）
        ├─ 读同 cwd 最近的 records（默认 1 个）
@@ -266,17 +266,18 @@ collectRecords(ws, selfId, includeSelf)
 ```
 
 `renderPrompt` 按 order 拼接：身份 100 → 人格 150 → 习惯 280 → 事实 300 → 其他工作区 310。
-`resume` 的旧会话恢复身份 + 人格，不重复接入习惯/事实/跨工作区；子代理不参与。
+`personaWorkspaceScoped: true` 时，每个 cwd 使用自己的 `identity.ini` 与 `current.md`；某个工作区缺文件就跳过，不回退到模板/其他工作区。
+`resume` 的旧会话恢复当前工作区的身份 + 人格，不重复接入习惯/事实/跨工作区；子代理不参与。
 
 ### 4.8 工具与命令
 
-- `persona_save`：写 `<personaDirectory>/current.md`，同时生成版本并裁剪旧版本；
+- `persona_save`：写当前工作区的 `personaRootFor(cwd)/current.md`，同时生成版本并裁剪旧版本；
 - `memory_save`：写入当前 entry 的 `notes`，并触发保存；
 - `memory_recall`：扫描同 cwd 的 record digest/notes，返回匹配片段；
 - `/memory` 命令：status/show/path/preview/clear/habits/identity/persona；
 - `/memory habits on|off`：通过 `ctx.settings.update` 写 profile 配置，失败则只改运行期；
-- `/memory identity [show|path]`：查看解析后的身份层或文件路径；
-- `/memory persona [show|versions|clear]`：查看/列出/清除人格记忆；
+- `/memory identity [show|path|import]`：查看当前工作区身份，或从模板导入；
+- `/memory persona [show|versions|clear]`：查看/列出/清除当前工作区人格记忆；
 - `/memory workspaces`：列出其他工作区；`/memory cross <query>`：检索其他工作区工作事实；
 - `memory_recall(scope:'all')`：跨工作区检索，只读工作事实，绝不读取身份/人格；
 - 跨工作区允许列表：`crossWorkspaceAllowlist`（cwd 数组，空 = 不共享），设置页多选窗口选择。

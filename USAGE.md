@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）使用文档
 
-适用版本：**1.3.2**（Windows / macOS / Linux）
+适用版本：**1.4.0**（Windows / macOS / Linux）
 插件包：`dsh-session-memory`
 源码目录：`<repo>`
 
@@ -10,14 +10,15 @@
 
 它在**本机**记录当前工作区的会话，并做三件事：
 
-1. **身份层**：读取一个全局 INI，保持“我是谁、怎么配合”；
-2. **交互习惯**：用规则归纳模型的配合方式，单独保存为两份 txt；
-3. **会话事实**：把对话与工具调用压缩成有上限的摘要。
+1. **身份层**：每个工作区独立的 INI，保持“我是谁、怎么配合”；
+2. **人格记忆**：每个工作区独立的 current.md，保存自我/关系摘要；
+3. **交互习惯**：用规则归纳模型的配合方式，单独保存为两份 txt；
+4. **会话事实**：把对话与工具调用压缩成有上限的摘要。
 
-在**同一工作目录**的下一个新会话启动时，插件按固定顺序自动接入：
+在同一工作目录的下一个新会话启动时，插件按固定顺序自动接入：
 
 ```
-身份（我是谁） → 交互习惯（怎么配合） → 会话事实（发生过什么）
+身份（我是谁） → 人格（关系/自我） → 交互习惯（怎么配合） → 会话事实（发生过什么）
 ```
 
 它不替代会话日志：会话日志仍是唯一事实来源，记忆只是可删除的派生缓存。
@@ -71,7 +72,9 @@
 
 ### 设置页面内容
 
-- **身份 INI 文件**：绝对路径；留空关闭身份层；
+- **身份 INI 模板**：绝对路径；只作为导入来源，不直接共享给所有工作区；
+- **人格按工作区隔离**：勾选后每个工作区独立身份与人格；
+- **人格目录**：默认 `$DSH_HOME/persona`；
 - **存储根目录**：文本输入框；
 - **浏览…**：调起系统目录选择器；
 - **恢复默认**：清空输入，回到默认目录；
@@ -95,10 +98,13 @@
 ### 目录结构
 
 ```
-<身份文件>                      任意路径的 INI，由 identityFile 指定（只读，不复制）
+<身份模板>                      任意路径的 INI，由 identityFile 指定（导入来源）
 <人格目录>/                     默认 $DSH_HOME/persona
-  current.md                    当前人格/关系摘要（≤ personaMaxChars）
-  versions/                     迭代版本，保留最近 personaKeepVersions 个
+  workspaces/
+    <工作区哈希>/
+      identity.ini              该工作区独立身份（由模板导入）
+      current.md                该工作区人格/关系摘要（≤ personaMaxChars）
+      versions/                 迭代版本，保留最近 personaKeepVersions 个
 <工作存储>/
   <工作区哈希>.json            事实/对话压缩（每个工作区一个）
   habits/
@@ -106,7 +112,8 @@
     <工作区哈希>.2.txt         上一次交互习惯总结
 ```
 
-- 工作区按会话的 `cwd` 区分；
+- 工作区按会话的 `cwd` 区分；身份与人格也按同一工作区哈希隔离；
+- 某工作区没有 `identity.ini` / `current.md` 就不注入，**不会回退到其他工作区或全局旧文件**；
 - 最多保留最近 20 个会话（`maxSessions`），超过 14 天（`maxAgeDays`）的记录不再接入/保留；
 - 所有本地文件都不上传网络。
 
@@ -125,39 +132,50 @@
 
 ## 5. 身份层（INI）
 
-身份层是全局的“我是谁”，不按工作区区分。设置 `identityFile` 后，每次新会话/恢复会话都会读取并解析该文件，注入为常驻段落（order **100**），早于习惯（280）和事实（300）。
+身份层按**工作区**隔离。`identityFile` 只是模板；每个工作区读取自己的：
 
+```
+<人格目录>/workspaces/<工作区哈希>/identity.ini
+```
+
+- 当前工作区导入模板：
+
+  ```
+  /memory identity import
+  ```
+
+- 其他工作区没有 `identity.ini` 时，身份层跳过，**不会回退到模板或别的工作区**；
 - 只解析 `[section]` + `key = value`，忽略 `#` / `;` 注释；
 - `[raw]` 节不参与注入（只作原文对照）；
 - `[meta]` 只读取 `version` / `updated`；
 - 正文上限 `identityMaxChars`（默认 1200）；
-- 文件不存在、不可读或解析为空时，身份层自动跳过，并在 Host 日志写一条 `session-memory:` 警告；
 - 身份层是稳定设定，不覆盖安全、诚实和工具规则，也不允许编造文件之外的事实。
-
-在设置页面的「身份 INI 文件」填入绝对路径即可；留空关闭。完整示例见 `examples/identity.example.ini`。
 
 查看解析结果：
 
 ```
 /memory identity
 /memory identity path
+/memory identity import
 ```
+
+完整示例见 `examples/identity.example.ini`。
 
 ---
 
-## 5.5 人格记忆（独立于工作记忆）
+## 5.5 人格记忆（按工作区隔离）
 
-人格记忆是全局的**自我认知与关系摘要**，与工作数据完全分开：
+人格记忆是当前工作区的**自我认知与关系摘要**，与工作数据完全分开：
 
-- 目录：`personaDirectory`，默认 `$DSH_HOME/persona`；
-- 当前：`<人格目录>/current.md`；
-- 版本：`<人格目录>/versions/<ISO>.md`，只保留最近 `personaKeepVersions` 个；
+- 目录：`<人格目录>/workspaces/<工作区哈希>/`；
+- 当前：`.../current.md`；
+- 版本：`.../versions/<ISO>.md`，只保留最近 `personaKeepVersions` 个；
 - 注入：order **150**，位于身份（100）之后、习惯（280）之前；
-- 更新：模型调用 `persona_save(text)`，或手动编辑 `current.md`；
+- 更新：模型调用 `persona_save(text)`，或手动编辑当前工作区的 `current.md`；
 - 上限：`personaMaxChars`（默认 1200）；超过会被拒绝，要求先压缩；
-- 清除：`/memory persona clear` 只清人格记忆，不影响身份/工作数据。
+- 清除：`/memory persona clear` 只清**当前工作区**的人格记忆，不影响其他工作区、身份或工作数据。
 
-“迭代”方式是：每次用一份完整的新摘要替换当前版本；旧版本自动保留，便于回滚。工作记忆、习惯、身份都不受影响。
+“迭代”方式是：每次用一份完整的新摘要替换当前工作区版本；旧版本自动保留，便于回滚。
 
 ```
 /memory persona
@@ -242,8 +260,8 @@
 
 新会话（`startup` / `clear`）在相同工作目录创建时，按 order 注入：
 
-1. **身份层**（`identityFile` 已配置时）：order `100`；
-2. **人格记忆**（`personaDirectory/current.md` 存在时）：order `150`；
+1. **身份层**（当前工作区 `identity.ini` 存在时）：order `100`；
+2. **人格记忆**（当前工作区 `current.md` 存在时）：order `150`；
 3. 该工作区最新的 `.1.txt`：**交互习惯（先读）**，order `280`；
 4. 最近一次事实摘要：**会话事实（后读）**，order `300`；
 5. 其他工作区工作记录（`crossWorkspaceEnabled` + `crossWorkspaceAttach` 开启时）：order `310`。
@@ -252,11 +270,11 @@
 
 以下情况不会接入：
 
-- `resume` 恢复的旧会话：**只恢复身份 + 人格**，不重复接入习惯/事实；
+- `resume` 恢复的旧会话：**只恢复当前工作区的身份 + 人格**，不重复接入习惯/事实；
 - 子代理会话：完全跳过；
-- 不同工作目录：不接入习惯/事实（身份、人格是全局的，仍会恢复）；
+- 不同工作目录：使用各自工作区的身份/人格；没有文件就空白，**不回退到全局**；
 - 习惯开关关闭时：只跳过习惯，事实仍接入；
-- 没有可用记录的新工作区：只恢复身份 + 人格。
+- 没有可用记录的新工作区：只恢复它自己的身份 + 人格（若已导入）。
 
 想确认下一次会话实际会看到什么，运行：
 
@@ -281,12 +299,13 @@
 | `/memory habits on\|off` | 开启/关闭习惯归纳 |
 | `/memory habits show` | 查看习惯文件内容 |
 | `/memory habits clear` | 删除该工作区的两份习惯文件 |
-| `/memory identity` | 查看解析后的身份层 |
-| `/memory identity path` | 查看身份文件路径 |
-| `/memory persona` | 人格记忆状态（目录、大小、版本数） |
-| `/memory persona show` | 查看当前人格摘要 |
-| `/memory persona versions` | 列出人格版本 |
-| `/memory persona clear` | 清除人格记忆与版本（不影响身份/工作） |
+| `/memory identity` | 查看当前工作区解析后的身份层 |
+| `/memory identity path` | 查看当前工作区身份文件路径 |
+| `/memory identity import` | 把身份模板复制到当前工作区 |
+| `/memory persona` | 当前工作区人格记忆状态（目录、大小、版本数） |
+| `/memory persona show` | 查看当前工作区人格摘要 |
+| `/memory persona versions` | 列出当前工作区人格版本 |
+| `/memory persona clear` | 清除当前工作区人格记忆与版本 |
 | `/memory workspaces` | 列出其他工作区（需开启跨工作区） |
 | `/memory cross <关键词>` | 检索其他工作区的工作事实 |
 
@@ -311,9 +330,10 @@
   name: 'dsh-session-memory'
   config:
     directory: ''          # 存储根目录；留空使用 $DSH_HOME/context-memory
-    identityFile: ''       # 身份 INI 绝对路径；留空关闭身份层
+    identityFile: ''       # 身份 INI 模板绝对路径
     identityMaxChars: 1200 # 身份层正文上限
     personaDirectory: ''   # 人格目录；留空 $DSH_HOME/persona
+    personaWorkspaceScoped: true # 每个工作区独立身份 + 人格
     personaMaxChars: 1200  # 人格摘要上限
     personaKeepVersions: 5 # 保留最近几个人格版本
     crossWorkspaceEnabled: false # 允许读取其他工作区工作记录
