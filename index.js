@@ -17,6 +17,18 @@ import { join, basename, dirname, resolve } from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { identityFromText } from './identity.js';
 import { clearPersona, listPersonaVersions, readPersona, writePersona } from './persona.js';
+import {
+  ageText,
+  buildDigest,
+  capNotes,
+  capOpenItems,
+  clip,
+  memoryId,
+  normalizeNote,
+  normalizeOpenItem,
+  recordHasActive,
+  trimTo,
+} from './memory.js';
 
 export const name = 'session-memory';
 export const inject = ['systemPrompt', 'tools', 'sessions', 'agents'];
@@ -33,7 +45,7 @@ const CROSS_ORDER = 310;
 const HABITS_ORDER = 280;
 const FORMAT_VERSION = 1;
 const DAY_MS = 86_400_000;
-const USAGE = '/memory [status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path|import]|persona [show|versions|clear]|workspaces|cross <query>]';
+const USAGE = '/memory [status|show|path|preview|clear|todo|pins|pin <id>|unpin <id>|resolve <id>|habits [on|off|show|clear]|identity [show|path|import]|persona [show|versions|clear]|workspaces|cross <query>]';
 
 export const Config = z.object({
   directory: z.string().default(''),
@@ -43,6 +55,7 @@ export const Config = z.object({
   maxItems: z.number().min(10).max(400).default(80),
   maxMessageChars: z.number().min(80).max(4000).default(600),
   maxNotes: z.number().min(0).max(100).default(12),
+  maxOpenItems: z.number().min(1).max(100).default(20),
   maxSessions: z.number().min(1).max(200).default(20),
   attachSessions: z.number().min(1).max(5).default(1),
   includeToolCalls: z.boolean().default(true),
@@ -88,6 +101,7 @@ function readConfig(raw) {
     maxItems: clampInt(source.maxItems, 80, 10, 400),
     maxMessageChars: clampInt(source.maxMessageChars, 600, 80, 4000),
     maxNotes: clampInt(source.maxNotes, 12, 0, 100),
+    maxOpenItems: clampInt(source.maxOpenItems, 20, 1, 100),
     maxSessions: clampInt(source.maxSessions, 20, 1, 200),
     attachSessions: clampInt(source.attachSessions, 1, 1, 5),
     includeToolCalls: source.includeToolCalls !== false,
@@ -124,17 +138,6 @@ function workspaceKey(cwd) {
   return createHash('sha1').update(normalizeCwd(cwd)).digest('hex').slice(0, 16);
 }
 
-/** Collapse whitespace and bound one line of digest text. */
-function clip(text, max) {
-  const flat = String(text ?? '').replace(/\s+/gu, ' ').trim();
-  return flat.length <= max ? flat : `${flat.slice(0, Math.max(0, max - 1))}…`;
-}
-
-function trimTo(text, max) {
-  if (text.length <= max) return text;
-  return `${text.slice(0, Math.max(0, max - 1))}…`;
-}
-
 /** Strip content that must never leak into a habit document. */
 function sanitizeSnippet(text) {
   return clip(
@@ -163,12 +166,6 @@ function stamp(ms) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-function roleLabel(role) {
-  if (role === 'user') return '用户';
-  if (role === 'assistant') return '助手';
-  return '工具';
-}
-
 function toolDetail(name, rawArguments) {
   let detail = '';
   try {
@@ -182,61 +179,10 @@ function toolDetail(name, rawArguments) {
   return clip(`${name}${detail ? ` ${detail}` : ''}`, 180);
 }
 
-/** Compress one session record into bounded markdown facts. */
-function buildDigest(record, cfg) {
-  const notes = Array.isArray(record.notes) ? record.notes : [];
-  const goals = Array.isArray(record.goals) ? record.goals : [];
-  const items = Array.isArray(record.items) ? record.items : [];
-  const parts = [];
-  let budget = Math.max(200, cfg.maxChars);
-
-  if (notes.length > 0) {
-    const text = `### 已保存的要点\n${notes.map((note) => `- ${note.text}${Array.isArray(note.tags) && note.tags.length > 0 ? ` [${note.tags.join(', ')}]` : ''}`).join('\n')}`;
-    const trimmed = trimTo(text, Math.min(900, Math.floor(budget * 0.35)));
-    parts.push(trimmed);
-    budget -= trimmed.length;
-  }
-
-  if (goals.length > 0) {
-    const text = `### 早期目标\n${goals.map((goal) => `- ${goal}`).join('\n')}`;
-    const trimmed = trimTo(text, Math.min(700, Math.floor(budget * 0.3)));
-    parts.push(trimmed);
-    budget -= trimmed.length;
-  }
-
-  const dialog = items.filter((item) => item.role !== 'tool');
-  const tools = items.filter((item) => item.role === 'tool').slice(-12);
-
-  const dialogBudget = Math.max(120, Math.floor(budget * 0.75));
-  const dialogLines = dialog.map((item) => `- ${roleLabel(item.role)}：${item.text}`);
-  let omitted = 0;
-  let dialogBody = dialogLines.join('\n');
-  while (dialogBody.length > dialogBudget && dialogLines.length > 0) {
-    dialogLines.shift();
-    omitted += 1;
-    dialogBody = dialogLines.join('\n');
-  }
-  if (dialogBody.length > 0) {
-    if (omitted > 0) dialogBody = `（更早的 ${omitted} 条对话已省略）\n${dialogBody}`;
-    parts.push(`### 最近对话\n${dialogBody}`);
-    budget -= dialogBody.length;
-  }
-
-  if (tools.length > 0 && budget > 80) {
-    const toolLines = tools.map((item) => `- ${item.text}`);
-    let toolBody = toolLines.join('\n');
-    while (toolBody.length > budget && toolLines.length > 0) {
-      toolLines.shift();
-      toolBody = toolLines.join('\n');
-    }
-    if (toolBody.length > 0) parts.push(`### 最近工具调用\n${toolBody}`);
-  }
-
-  return parts.join('\n\n');
-}
-
 function toRecord(entry, cfg) {
-  const digest = buildDigest(entry, cfg);
+  const notes = capNotes(Array.isArray(entry.notes) ? entry.notes : [], cfg.maxNotes);
+  const openItems = capOpenItems(Array.isArray(entry.openItems) ? entry.openItems : [], cfg.maxOpenItems);
+  const digest = buildDigest({ ...entry, notes, openItems }, cfg);
   return {
     id: entry.id,
     cwd: entry.cwd,
@@ -246,7 +192,8 @@ function toRecord(entry, cfg) {
     turns: entry.turns,
     items: entry.items.slice(-cfg.maxItems),
     goals: entry.goals.slice(-20),
-    notes: entry.notes.slice(-cfg.maxNotes),
+    notes,
+    openItems,
     stats: {
       rawChars: entry.rawChars,
       digestChars: digest.length,
@@ -413,6 +360,7 @@ function factsSectionText(facts) {
   return [
     '## 会话事实（后读）',
     '以下为同一工作目录上一次会话的自动压缩记录，属于历史参考而非本轮用户请求；只在相关时使用，若与本轮指令冲突，以本轮指令为准。',
+    '摘要可能有损、可能过时；它只是索引，不是唯一事实来源。涉及关键决定、理由、文件内容或当前状态时，以本地文件和会话日志为准，不要仅凭摘要断言。',
     '',
     facts,
   ].join('\n');
@@ -423,8 +371,7 @@ function factsSectionText(facts) {
  * @param ctx - plugin context.
  * @param config - optional local configuration from the profile patch.
  */
-export function apply(ctx, config) {
-  const cfg = readConfig(config);
+export function apply(ctx, config) {  const cfg = readConfig(config);
   habitRoot = cfg.directory;
   ctx.logger?.info?.(`session-memory: storage ${cfg.directory}${cfg.enabled ? '' : ' (disabled)'}`);
   if (!cfg.enabled) return;
@@ -480,10 +427,14 @@ export function apply(ctx, config) {
 
   function prune(workspace) {
     const cutoff = Date.now() - cfg.maxAgeDays * DAY_MS;
-    const sessions = Object.entries(workspace.data.sessions ?? {})
-      .filter(([, record]) => typeof record?.updatedAt === 'number' && record.updatedAt >= cutoff)
+    const all = Object.entries(workspace.data.sessions ?? {})
+      .filter(([, record]) => typeof record?.updatedAt === 'number');
+    const active = all.filter(([, record]) => recordHasActive(record));
+    const ordinary = all
+      .filter(([, record]) => !recordHasActive(record) && record.updatedAt >= cutoff)
       .sort((a, b) => b[1].updatedAt - a[1].updatedAt)
-      .slice(0, cfg.maxSessions);
+      .slice(0, Math.max(0, cfg.maxSessions - active.length));
+    const sessions = [...active, ...ordinary].sort((a, b) => b[1].updatedAt - a[1].updatedAt);
     workspace.data.sessions = Object.fromEntries(sessions);
   }
 
@@ -520,17 +471,40 @@ export function apply(ctx, config) {
   }
 
   function mergeStoredNotes(entry, stored) {
-    if (!Array.isArray(stored?.notes) || stored.notes.length === 0) return;
-    const seen = new Set(entry.notes.map((note) => `${note.time}:${note.text}`));
-    for (const note of stored.notes) {
-      const key = `${note.time}:${note.text}`;
-      if (!seen.has(key)) {
+    const storedNotes = Array.isArray(stored?.notes) ? stored.notes.map((note) => normalizeNote(note)) : [];
+    const known = new Set(entry.notes.map((note) => note.id));
+    for (const note of storedNotes) {
+      const existing = entry.notes.find((item) => item.id === note.id);
+      if (existing) {
+        // The in-memory entry is authoritative (it may have just been
+        // unpinned); never re-apply a stale pinned flag from disk.
+        continue;
+      }
+      if (!known.has(note.id)) {
         entry.notes.push(note);
-        seen.add(key);
+        known.add(note.id);
       }
     }
-    entry.notes.sort((a, b) => (a.time ?? 0) - (b.time ?? 0));
-    if (entry.notes.length > cfg.maxNotes) entry.notes.splice(0, entry.notes.length - cfg.maxNotes);
+    entry.notes = capNotes(entry.notes, cfg.maxNotes);
+
+    const storedOpen = Array.isArray(stored?.openItems) ? stored.openItems.map((item) => normalizeOpenItem(item)) : [];
+    if (!Array.isArray(entry.openItems)) entry.openItems = [];
+    const knownOpen = new Set(entry.openItems.map((item) => item.id));
+    for (const item of storedOpen) {
+      if (!knownOpen.has(item.id)) {
+        entry.openItems.push(item);
+        knownOpen.add(item.id);
+      }
+    }
+    entry.openItems = capOpenItems(entry.openItems, cfg.maxOpenItems);
+  }
+
+  function findMemoryItem(entry, id) {
+    const note = (entry.notes ?? []).find((item) => item.id === id);
+    if (note) return { kind: 'note', note };
+    const openItem = (entry.openItems ?? []).find((item) => item.id === id);
+    if (openItem) return { kind: 'todo', item: openItem };
+    return undefined;
   }
 
   async function saveEntry(entry) {
@@ -567,6 +541,7 @@ export function apply(ctx, config) {
         items: [],
         goals: [],
         notes: [],
+        openItems: [],
         style: newStyle(),
         rawChars: 0,
         lastSeq: -1,
@@ -648,14 +623,15 @@ export function apply(ctx, config) {
     const records = new Map();
     for (const [id, record] of Object.entries(workspace.data.sessions ?? {})) {
       if (!includeSelf && id === selfId) continue;
-      if (typeof record?.updatedAt !== 'number' || record.updatedAt < cutoff) continue;
+      if (typeof record?.updatedAt !== 'number') continue;
+      if (record.updatedAt < cutoff && !recordHasActive(record)) continue;
       records.set(id, record);
     }
     for (const [id, entry] of entries) {
       if (!includeSelf && id === selfId) continue;
       if (entry.cwdKey !== workspace.key) continue;
-      if (entry.items.length === 0 && entry.notes.length === 0) continue;
-      const view = { ...entry, notes: [...entry.notes] };
+      if (entry.items.length === 0 && entry.notes.length === 0 && (entry.openItems?.length ?? 0) === 0) continue;
+      const view = { ...entry, notes: [...entry.notes], openItems: [...(entry.openItems ?? [])] };
       mergeStoredNotes(view, workspace.data.sessions[id]);
       records.set(id, toRecord(view, cfg));
     }
@@ -670,7 +646,7 @@ export function apply(ctx, config) {
         : buildDigest(record, cfg);
       if (digest.trim().length === 0) continue;
       const title = record.title ? `「${record.title}」` : '';
-      blocks.push(`### 会话 ${record.id}${title}（更新于 ${stamp(record.updatedAt)}）\n${digest}`);
+      blocks.push(`### 会话 ${record.id}${title}（更新于 ${stamp(record.updatedAt)}，${ageText(record.updatedAt)}）\n${digest}`);
     }
     if (blocks.length === 0) return '';
     return blocks.join('\n\n');
@@ -703,7 +679,7 @@ export function apply(ctx, config) {
           .filter((record) => typeof record?.digest === 'string'
             && record.digest.trim().length > 0
             && typeof record.updatedAt === 'number'
-            && record.updatedAt >= cutoff)
+            && (record.updatedAt >= cutoff || recordHasActive(record)))
           .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
         if (records.length === 0) continue;
         workspaces.push({
@@ -971,19 +947,37 @@ export function apply(ctx, config) {
 
   ctx.tools.register({
     name: 'memory_save',
-    description: '把值得跨会话保留的要点写入本机的会话记忆。下一个会话在同一工作目录启动时会自动读取压缩后的记忆。适合保存项目目标、关键决策、约定、未完成的下一步；不要保存密钥、令牌或大段原文。',
+    description: '把值得跨会话保留的工作记忆写入本机。kind=note 存要点；kind=todo 存未完成事项/阻塞，不跟闲聊混。尽量给 why（一句为什么），关键内容可用 pinned 标记为永久（跳过压缩）。不要保存密钥、令牌或大段原文。',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
         note: {
           type: 'string',
-          description: '一条独立、可复用的要点，建议 200 字以内。',
+          description: '一条独立、可复用的内容，建议 200 字以内。',
         },
         tags: {
           type: 'array',
           items: { type: 'string' },
           description: '可选标签，最多 5 个。',
+        },
+        why: {
+          type: 'string',
+          description: '可选：这条为什么重要/为什么这样决定，一句即可（建议 60 字以内）。',
+        },
+        kind: {
+          type: 'string',
+          enum: ['note', 'todo'],
+          description: 'note（默认）普通要点；todo 未完成事项/阻塞。',
+        },
+        status: {
+          type: 'string',
+          enum: ['open', 'blocked'],
+          description: 'kind=todo 时使用：open 待办，blocked 阻塞。默认 open。',
+        },
+        pinned: {
+          type: 'boolean',
+          description: 'true 表示永久钉住；压缩时跳过，不随普通要点淘汰。',
         },
       },
       required: ['note'],
@@ -994,13 +988,19 @@ export function apply(ctx, config) {
         additionalProperties: false,
         properties: {
           saved: { type: 'boolean' },
+          id: { type: 'string' },
+          kind: { type: 'string' },
           notes: { type: 'integer' },
+          openItems: { type: 'integer' },
+          pinned: { type: 'boolean' },
         },
-        required: ['saved', 'notes'],
+        required: ['saved', 'id', 'kind', 'notes', 'openItems', 'pinned'],
       },
       render: (_args, value) => [{
         type: 'text',
-        text: value.saved ? `已保存到本地会话记忆（当前共 ${value.notes} 条要点）。` : '未保存。',
+        text: value.saved
+          ? `已保存${value.kind === 'todo' ? '未完成事项' : '要点'}（id: ${value.id}${value.pinned ? '，已钉住' : ''}）。当前要点 ${value.notes} 条，未完成 ${value.openItems} 条。`
+          : '未保存。',
       }],
     },
     async execute(args, exec) {
@@ -1009,15 +1009,144 @@ export function apply(ctx, config) {
       if (!agent) throw new Error('memory_save 需要所属会话');
       const entry = entries.get(agent.id) ?? ensureEntry(agent.session, true);
       if (!entry) throw new Error('子代理会话不参与跨会话记忆');
-      if (cfg.maxNotes === 0) throw new Error('当前配置不保存要点（maxNotes = 0）');
       const text = typeof args?.note === 'string' ? args.note.trim() : '';
       if (text.length === 0) throw new Error('note 不能为空');
+      const kind = args?.kind === 'todo' ? 'todo' : 'note';
+      if (kind === 'note' && cfg.maxNotes === 0) throw new Error('当前配置不保存要点（maxNotes = 0）');
+      const why = typeof args?.why === 'string' ? clip(args.why, 200) : '';
+      const pinned = args?.pinned === true;
       const tags = Array.isArray(args?.tags) ? args.tags.slice(0, 5).map((tag) => clip(String(tag), 24)) : [];
-      entry.notes.push({ text: clip(text, 400), tags, time: Date.now() });
-      if (entry.notes.length > cfg.maxNotes) entry.notes.splice(0, entry.notes.length - cfg.maxNotes);
+      const time = Date.now();
+      const id = memoryId(kind === 'todo' ? 't' : 'n', clip(text, 400), time);
+      if (kind === 'todo') {
+        if (!Array.isArray(entry.openItems)) entry.openItems = [];
+        entry.openItems.push({
+          id,
+          text: clip(text, 400),
+          why,
+          status: args?.status === 'blocked' ? 'blocked' : 'open',
+          time,
+          pinned,
+        });
+        entry.openItems = capOpenItems(entry.openItems, cfg.maxOpenItems);
+      } else {
+        entry.notes.push({ id, text: clip(text, 400), why, tags, time, pinned });
+        entry.notes = capNotes(entry.notes, cfg.maxNotes);
+      }
+      entry.updatedAt = time;
+      await saveEntry(entry);
+      return {
+        saved: true,
+        id,
+        kind,
+        notes: entry.notes.length,
+        openItems: (entry.openItems ?? []).filter((item) => item.status === 'open' || item.status === 'blocked').length,
+        pinned,
+      };
+    },
+  });
+
+  ctx.tools.register({
+    name: 'memory_pin',
+    description: '把一条已保存的要点或未完成事项标记为永久钉住（或取消钉住）。钉住的内容会在压缩时跳过，不会因普通上限被淘汰。id 来自 memory_save 返回值或 /memory show。',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: { type: 'string', description: '要钉住的条目 id。' },
+        pinned: { type: 'boolean', description: 'true 钉住，false 取消；默认 true。' },
+      },
+      required: ['id'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          found: { type: 'boolean' },
+          pinned: { type: 'boolean' },
+          id: { type: 'string' },
+          kind: { type: 'string' },
+        },
+        required: ['found', 'pinned', 'id', 'kind'],
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.found
+          ? `${value.pinned ? '已钉住' : '已取消钉住'} ${value.id}（${value.kind === 'todo' ? '未完成事项' : '要点'}）。`
+          : `未找到条目 ${value.id}。`,
+      }],
+    },
+    async execute(args, exec) {
+      const id = typeof args?.id === 'string' ? args.id.trim() : '';
+      if (!id) throw new Error('id 不能为空');
+      const agent = exec.agent;
+      if (!agent) throw new Error('memory_pin 需要所属会话');
+      const entry = entries.get(agent.id) ?? ensureEntry(agent.session, true);
+      if (!entry) throw new Error('子代理会话不参与跨会话记忆');
+      const header = agent.session?.header ?? {};
+      if (typeof header.cwd === 'string' && header.cwd.length > 0) {
+        const workspace = await loadWorkspace(header.cwd);
+        mergeStoredNotes(entry, workspace.data.sessions[agent.id]);
+      }
+      const found = findMemoryItem(entry, id);
+      if (!found) throw new Error(`未找到条目 ${id}`);
+      const pinned = args?.pinned !== false;
+      if (found.kind === 'note') found.note.pinned = pinned;
+      else found.item.pinned = pinned;
       entry.updatedAt = Date.now();
       await saveEntry(entry);
-      return { saved: true, notes: entry.notes.length };
+      return { found: true, pinned, id, kind: found.kind };
+    },
+  });
+
+  ctx.tools.register({
+    name: 'memory_resolve',
+    description: '把一条未完成事项标记为已完成，不再出现在待办和摘要里。用于收尾；不要用它删除普通要点。id 来自 memory_save 返回值或 /memory todo。',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: { type: 'string', description: '要完成的未完成事项 id。' },
+      },
+      required: ['id'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          resolved: { type: 'boolean' },
+          id: { type: 'string' },
+        },
+        required: ['resolved', 'id'],
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.resolved ? `已完成并标记未完成事项 ${value.id}。` : `未找到 ${value.id}。`,
+      }],
+    },
+    async execute(args, exec) {
+      const id = typeof args?.id === 'string' ? args.id.trim() : '';
+      if (!id) throw new Error('id 不能为空');
+      const agent = exec.agent;
+      if (!agent) throw new Error('memory_resolve 需要所属会话');
+      const entry = entries.get(agent.id) ?? ensureEntry(agent.session, true);
+      if (!entry) throw new Error('子代理会话不参与跨会话记忆');
+      const header = agent.session?.header ?? {};
+      if (typeof header.cwd === 'string' && header.cwd.length > 0) {
+        const workspace = await loadWorkspace(header.cwd);
+        mergeStoredNotes(entry, workspace.data.sessions[agent.id]);
+      }
+      const found = findMemoryItem(entry, id);
+      if (!found) throw new Error(`未找到未完成事项 ${id}`);
+      if (found.kind !== 'todo') throw new Error(`${id} 是普通要点，不是未完成事项`);
+      found.item.status = 'done';
+      found.item.resolvedAt = Date.now();
+      entry.openItems = capOpenItems(entry.openItems ?? [], cfg.maxOpenItems);
+      entry.updatedAt = Date.now();
+      await saveEntry(entry);
+      return { resolved: true, id };
     },
   });
 
@@ -1101,7 +1230,12 @@ export function apply(ctx, config) {
         const record = candidate.record;
         const digest = record.digest ?? '';
         if (query.length > 0) {
-          const haystack = `${record.title ?? ''}\n${digest}\n${(record.notes ?? []).map((note) => note.text).join('\n')}`.toLowerCase();
+          const haystack = [
+            record.title ?? '',
+            digest,
+            ...(record.notes ?? []).map((note) => `${note.text ?? ''} ${note.why ?? ''}`),
+            ...(record.openItems ?? []).map((item) => `${item.text ?? ''} ${item.why ?? ''}`),
+          ].join('\n').toLowerCase();
           if (!haystack.includes(query)) continue;
         }
         const at = query.length > 0 ? digest.toLowerCase().indexOf(query) : -1;
@@ -1109,8 +1243,10 @@ export function apply(ctx, config) {
           ? digest.slice(Math.max(0, at - 200), at + 400)
           : digest.slice(0, 900);
         if (at < 0 && query.length > 0) {
-          const note = (record.notes ?? []).find((entryNote) => String(entryNote.text ?? '').toLowerCase().includes(query));
-          if (note) excerpt = `要点：${note.text}`;
+          const note = (record.notes ?? []).find((entryNote) => `${entryNote.text ?? ''} ${entryNote.why ?? ''}`.toLowerCase().includes(query));
+          if (note) excerpt = `要点：${note.text}${note.why ? `（为什么：${note.why}）` : ''}`;
+          const openItem = (record.openItems ?? []).find((item) => `${item.text ?? ''} ${item.why ?? ''}`.toLowerCase().includes(query));
+          if (!note && openItem) excerpt = `未完成事项：${openItem.text}${openItem.why ? `（为什么：${openItem.why}）` : ''}`;
         }
         hits.push({
           workspace: candidate.workspace,
@@ -1338,6 +1474,63 @@ export function apply(ctx, config) {
     const workspace = await loadWorkspace(header.cwd);
     const habitPath = join(habitDirectory(), `${workspace.key}.1.txt`);
     const previousHabitPath = join(habitDirectory(), `${workspace.key}.2.txt`);
+    const currentEntry = entries.get(invocation.agent.id) ?? ensureEntry(invocation.agent.session, true);
+    if (currentEntry) mergeStoredNotes(currentEntry, workspace.data.sessions[invocation.agent.id]);
+
+    if (head === 'todo') {
+      const records = collectRecords(workspace, invocation.agent.id, true);
+      const lines = ['未完成事项（当前工作区）'];
+      let count = 0;
+      for (const record of records) {
+        for (const item of record.openItems ?? []) {
+          if (item.status !== 'open' && item.status !== 'blocked') continue;
+          count += 1;
+          lines.push(`- [${item.status === 'blocked' ? '阻塞' : '未完成'}] ${item.text}`);
+          if (item.why) lines.push(`  为什么：${item.why}`);
+          lines.push(`  id: ${item.id} · 会话 ${record.id} · ${stamp(item.time)}`);
+        }
+      }
+      if (count === 0) return { kind: 'success', text: '当前工作区没有未完成事项。' };
+      lines.push('', '完成：/memory resolve <id>；钉住：/memory pin <id>');
+      return { kind: 'success', text: lines.join('\n') };
+    }
+
+    if (head === 'pins') {
+      const pinned = (currentEntry?.notes ?? []).filter((note) => note.pinned);
+      if (pinned.length === 0) return { kind: 'success', text: '当前会话没有钉住的要点。' };
+      return {
+        kind: 'success',
+        text: ['钉住的要点（当前会话）', ...pinned.map((note) => `- ${note.text}\n  id: ${note.id}${note.why ? ` · 为什么：${note.why}` : ''}`)].join('\n'),
+      };
+    }
+
+    if (head === 'pin' || head === 'unpin') {
+      const id = rest[0] ?? '';
+      if (!id) return { kind: 'error', text: `用法：/memory ${head} <id>` };
+      if (!currentEntry) return { kind: 'error', text: '当前会话没有可编辑的记忆。' };
+      const found = findMemoryItem(currentEntry, id);
+      if (!found) return { kind: 'error', text: `当前会话未找到条目 ${id}；先运行 /memory show 或 /memory todo 查看 id。` };
+      const pinned = head === 'pin';
+      if (found.kind === 'note') found.note.pinned = pinned;
+      else found.item.pinned = pinned;
+      currentEntry.updatedAt = Date.now();
+      await saveEntry(currentEntry);
+      return { kind: 'success', text: `${pinned ? '已钉住' : '已取消钉住'} ${id}。` };
+    }
+
+    if (head === 'resolve') {
+      const id = rest[0] ?? '';
+      if (!id) return { kind: 'error', text: '用法：/memory resolve <id>' };
+      if (!currentEntry) return { kind: 'error', text: '当前会话没有可编辑的记忆。' };
+      const found = findMemoryItem(currentEntry, id);
+      if (!found || found.kind !== 'todo') return { kind: 'error', text: `当前会话未找到未完成事项 ${id}。` };
+      found.item.status = 'done';
+      found.item.resolvedAt = Date.now();
+      currentEntry.openItems = capOpenItems(currentEntry.openItems ?? [], cfg.maxOpenItems);
+      currentEntry.updatedAt = Date.now();
+      await saveEntry(currentEntry);
+      return { kind: 'success', text: `已完成并标记未完成事项 ${id}。` };
+    }
 
     if (!head || head === 'status') {
       const all = collectRecords(workspace, invocation.agent.id, true);
@@ -1367,7 +1560,8 @@ export function apply(ctx, config) {
         `习惯文件：${habitPath}`,
         `习惯备份：${previousHabitPath}`,
         `记录数：${all.length}`,
-        `要点数：${[...entries.values()].find((entry) => entry.id === invocation.agent.id)?.notes.length ?? 0}`,
+        `要点数：${currentEntry?.notes.length ?? 0}（钉住 ${currentEntry?.notes.filter((note) => note.pinned).length ?? 0}）`,
+        `未完成事项：${(currentEntry?.openItems ?? []).filter((item) => item.status === 'open' || item.status === 'blocked').length}`,
       ];
       if (habitText) {
         lines.push('', '最新交互习惯：', clip(habitText.replace(/\n/gu, ' '), 240));
@@ -1442,7 +1636,10 @@ export function apply(ctx, config) {
       workspace.data.updatedAt = Date.now();
       await queueWrite(workspace);
       for (const entry of entries.values()) {
-        if (entry.cwdKey === workspace.key) entry.notes = [];
+        if (entry.cwdKey === workspace.key) {
+          entry.notes = [];
+          entry.openItems = [];
+        }
       }
       return { kind: 'success', text: '已清除该工作目录保存的会话事实；当前会话之后的回合会重新开始记录。交互习惯未受影响，使用 /memory habits clear 清除。' };
     }
@@ -1486,8 +1683,8 @@ export function apply(ctx, config) {
   ctx.inject(['commands'], (commandCtx) => {
     commandCtx.effect(() => commandCtx.commands.register({
       name: 'memory',
-      description: '查看、预览或清除本地工作记忆、交互习惯、身份层与人格记忆，并可按需读取其他工作区的工作记录',
-      input: { hint: '[status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path|import]|persona [show|versions|clear]|workspaces|cross <query>]' },
+      description: '查看、预览或清除本地工作记忆、待办、钉住要点、交互习惯、身份层与人格记忆，并可按需读取其他工作区的工作记录',
+      input: { hint: '[status|show|path|preview|clear|todo|pins|pin <id>|unpin <id>|resolve <id>|habits [on|off|show|clear]|identity [show|path|import]|persona [show|versions|clear]|workspaces|cross <query>]' },
       handler: memoryCommand,
     }));
   });

@@ -81,6 +81,32 @@
 
 示例见 `examples/persona.example.md`。
 
+## 工作记忆：要点、待办、钉住
+
+- `memory_save(note, why?, tags?, kind?, status?, pinned?)`
+  - `kind: 'note'`：普通要点；
+  - `kind: 'todo'`：未完成事项/阻塞，摘要里单独成段；
+  - `why`：一句为什么，跟着条目一起保存和注入；
+  - `pinned: true`：永久钉住，压缩时跳过，不随普通上限/时间窗口淘汰。
+- `memory_pin(id, pinned?)`：钉住/取消钉住；
+- `memory_resolve(id)`：把待办标记为完成，不再出现在待办/摘要里；
+- 每个条目有稳定 id（`memory_save` 返回，`/memory show` / `/memory todo` 可查）。
+
+摘要结构：
+
+```markdown
+### 长期要点（钉住，跳过压缩）
+- ...（为什么：...）
+
+### 未完成事项
+- [未完成/阻塞] ...（为什么：...）（id: ...）
+
+### 已保存的要点
+- ...（为什么：...）
+```
+
+摘要可能被裁剪，**只是索引**；关键事实、决定理由和当前状态以本地文件/会话日志为准。
+
 ## 跨工作区工作记录（可选）
 
 默认关闭。开启 `crossWorkspaceEnabled` 后：
@@ -129,7 +155,11 @@
 - `/memory show`：身份 → 人格 → 习惯 → 最近事实；
 - `/memory preview`：打印下次注入的完整顺序；
 - `/memory path`：工作记录文件路径；
-- `/memory clear`：只清该工作区的事实；
+- `/memory clear`：只清该工作区的事实、要点与待办；
+- `/memory todo`：列出当前工作区未完成事项（带 id）；
+- `/memory pins`：列出当前会话钉住的要点；
+- `/memory pin <id>` / `/memory unpin <id>`：钉住/取消钉住；
+- `/memory resolve <id>`：完成一条待办；
 - `/memory habits [show|on|off|clear]`：交互习惯；
 - `/memory identity [show|path|import]`：身份层；`import` 把模板复制到当前工作区；
 - `/memory persona [show|versions|clear]`：当前工作区的人格记忆与版本；
@@ -139,7 +169,9 @@
 ## 模型工具
 
 - `persona_save(text)`：写入/迭代人格记忆（≤ `personaMaxChars`，自动版本化）；
-- `memory_save(note, tags?)`：写工作记忆要点；
+- `memory_save(note, why?, tags?, kind?, status?, pinned?)`：写要点或待办；
+- `memory_pin(id, pinned?)`：钉住/取消钉住；
+- `memory_resolve(id)`：完成待办；
 - `memory_recall(query?, limit?, scope?)`：检索工作记忆；`scope: 'all'` 时跨工作区。
 
 ## 配置
@@ -166,6 +198,7 @@
     maxItems: 80
     maxMessageChars: 600
     maxNotes: 12
+    maxOpenItems: 20            # 未完成事项上限
     maxSessions: 20
     attachSessions: 1
     includeToolCalls: true
@@ -179,6 +212,7 @@
 - 默认按工作区隔离身份与人格；某工作区没有文件就不注入，不会回退到其他工作区。
 - QQ 等持久通道的 Agent 可能早于插件监听器创建；插件启动时会扫描 live roots 并在 `session/event` 上补挂，不依赖 `agent/created` 一定触发。
 - 人格记忆是**迭代摘要**，不是完整自传；每次替换必须自己保留仍需的要点。
+- 工作摘要可能有损/过时，只是索引；钉住条目和未完成事项会优先保留，但仍建议把关键决定落成文件。
 - 习惯归纳是规则推断，不调用模型。
 - 人格摘要、事实、习惯都是纯文本，可直接查看/删除。
 - 跨工作区读取只针对**工作事实**，不读取身份/人格；但工作事实本身可能含敏感项目内容，默认关闭，需显式开启。

@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）使用文档
 
-适用版本：**1.4.1**（Windows / macOS / Linux）
+适用版本：**1.5.2**（Windows / macOS / Linux）
 插件包：`dsh-session-memory`
 源码目录：`<repo>`
 
@@ -284,6 +284,37 @@
 
 ---
 
+## 7.5 工作记忆的可靠性字段
+
+`memory_save` 支持：
+
+| 字段 | 作用 |
+|---|---|
+| `kind: 'note'` | 普通要点 |
+| `kind: 'todo'` | 未完成事项/阻塞，单独成段 |
+| `why` | 一句“为什么”，跟条目一起保存、注入、检索 |
+| `status: 'open' \| 'blocked'` | 待办/阻塞 |
+| `pinned: true` | 永久钉住，压缩时跳过，不受普通时间/数量上限淘汰 |
+
+相关工具/命令：
+
+- `memory_pin(id, pinned?)`、`/memory pin|unpin <id>`；
+- `memory_resolve(id)`、`/memory resolve <id>`：标记完成，不再进入摘要；
+- `/memory todo`：列出当前工作区待办（带 id）；
+- `/memory pins`：列出当前会话钉住的要点。
+
+摘要现在包含：
+
+```markdown
+### 长期要点（钉住，跳过压缩）
+### 未完成事项
+### 已保存的要点
+```
+
+摘要仍然是有损索引；`factsSectionText` 会明确提示：关键事实、决定理由、文件内容以本地文件和会话日志为准。
+
+---
+
 ## 8. 命令与模型工具
 
 ### 命令
@@ -294,7 +325,11 @@
 | `/memory show` | 身份 → 人格 → 习惯 → 最近一次事实摘要 |
 | `/memory preview` | 打印下次会话将按什么顺序注入的完整内容 |
 | `/memory path` | 工作记录文件路径 |
-| `/memory clear` | 清除该工作区的事实记忆（不影响身份/人格/习惯） |
+| `/memory clear` | 清除该工作区的事实、要点与待办（不影响身份/人格/习惯） |
+| `/memory todo` | 列出当前工作区未完成事项（带 id） |
+| `/memory pins` | 列出当前会话钉住的要点 |
+| `/memory pin <id>` / `/memory unpin <id>` | 钉住/取消钉住 |
+| `/memory resolve <id>` | 完成一条待办 |
 | `/memory habits` | 查看最新习惯 |
 | `/memory habits on\|off` | 开启/关闭习惯归纳 |
 | `/memory habits show` | 查看习惯文件内容 |
@@ -314,10 +349,12 @@
 | 工具 | 作用 |
 |---|---|
 | `persona_save(text)` | 写入/迭代人格记忆（≤ `personaMaxChars`，自动版本化） |
-| `memory_save(note, tags?)` | 让模型把项目目标、决策、约定、下一步写入工作记忆 |
+| `memory_save(note, why?, tags?, kind?, status?, pinned?)` | 写要点或待办 |
+| `memory_pin(id, pinned?)` | 钉住/取消钉住 |
+| `memory_resolve(id)` | 完成待办 |
 | `memory_recall(query?, limit?, scope?)` | 检索工作记忆；`scope: 'all'` 时跨工作区（只含工作事实） |
 
-`memory_save` 写入的要点会单独保存在事实记录的 `notes` 中，并在下次会话的“已保存的要点”里优先出现。
+`memory_save` 写入的要点会保存在事实记录的 `notes`，待办保存在 `openItems`；钉住项和未完成事项不会随普通摘要裁剪丢失。
 
 ---
 
@@ -336,6 +373,7 @@
     personaWorkspaceScoped: true # 每个工作区独立身份 + 人格
     personaMaxChars: 1200  # 人格摘要上限
     personaKeepVersions: 5 # 保留最近几个人格版本
+    maxOpenItems: 20      # 未完成事项上限
     crossWorkspaceEnabled: false # 允许读取其他工作区工作记录
     crossWorkspaceAttach: false  # 新会话自动注入其他工作区摘要
     crossWorkspaceAllowlist: []  # 允许的工作区 cwd；空 = 不共享
@@ -399,7 +437,7 @@
 
 ### 10.7 隐私
 
-所有数据都在本机：事实/习惯写入存储根目录，身份文件只读、不会被复制或上传；插件不联网。可以直接删除文件，或使用 `/memory clear`、`/memory habits clear`。
+所有数据都在本机：事实/习惯写入存储根目录，身份模板导入到当前工作区的 `identity.ini`；插件不联网。可以直接删除文件，或使用 `/memory clear`、`/memory habits clear`、`/memory persona clear`。
 
 ### 10.8 身份层没有生效
 
@@ -431,6 +469,7 @@
 
 - 身份层是稳定设定，不覆盖安全、诚实和工具规则；也不会让模型获得文件之外的真实记忆；
 - 人格记忆是**迭代摘要**，不是完整自传；每次替换必须保留仍需的要点，且受 `personaMaxChars` 限制；
+- 工作摘要可能有损、过时；钉住/未完成事项优先保留，但关键决定仍应落成文件；
 - 人格版本只保留最近 `personaKeepVersions` 个，旧版本会被清理；
 - 习惯归纳是**规则推断**，不调用模型；它反映统计倾向，不是绝对准确的偏好判断；
 - 习惯是参考，不是指令；与当前用户要求冲突时，以当前要求为准；

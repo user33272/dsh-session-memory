@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）插件架构
 
-适用版本：**1.4.1**
+适用版本：**1.5.2**
 源码目录：`<repo>`
 配套文档：[USAGE.md](USAGE.md)（怎么用）、[README.md](README.md)（配置速查）
 
@@ -24,11 +24,12 @@
   package.json          # 双半声明：bundle patch + client + exports
   cordis.patch.yml      # 向 profile 插入 session-memory 这一行
   index.js              # Host 半（Cordis 插件）
+  memory.js             # 工作摘要/要点/待办/钉住的纯函数
   identity.js           # INI 解析与身份层渲染（纯函数）
   persona.js            # 人格记忆读写、版本化、裁剪（纯文件操作）
   client.js             # Client 半（浏览器模块）
   examples/             # identity.example.ini / persona.example.md
-  test/                 # identity.test.mjs / persona.test.mjs
+  test/                 # identity.test.mjs / persona.test.mjs / memory.test.mjs
   locale/en.json        # 插件显示名/描述（英文）
   locale/zh.json        # 插件显示名/描述（中文）
   icon.svg              # 插件图标
@@ -170,7 +171,8 @@ entry = {
   createdAt, updatedAt, turns,
   items:  [{role, text, time}],   // 最近对话/工具摘要
   goals:  [第一条用户消息...],      // 早期目标
-  notes:  [{text, tags, time}],    // memory_save 要点
+  notes:  [{id, text, why, tags, time, pinned}],       // memory_save 要点
+  openItems: [{id, text, why, status, time, pinned}],  // 待办/阻塞
   style:  {语言/格式/工具/明确要求计数},
   lastSeq, seeded, turnOpen
 }
@@ -190,7 +192,7 @@ entry = {
 | `noteUserText` | 用户语言比例、长度、明确要求句式 |
 | `noteAssistantText` | 助手标题/列表/代码块/表格统计 |
 | `noteToolCall` | 工具次数、先读后改、命令验证、todo、确认 |
-| `buildDigest(record, cfg)` | 事实摘要：要点 → 早期目标 → 最近对话 → 最近工具 |
+| `buildDigest(record, cfg)` | 事实摘要：钉住要点 → 未完成事项 → 普通要点 → 早期目标 → 最近对话 → 最近工具 |
 | `toRecord(entry, cfg)` | 生成持久化记录（含 digest/stats） |
 
 压缩策略：
@@ -198,7 +200,8 @@ entry = {
 - 事实摘要上限 `maxChars`（默认 3000）；
 - 对话优先于工具；工具最多保留最近 12 条；
 - 超出预算从最早处丢弃，并标注省略条数；
-- `notes` 永远优先放在摘要最前面。
+- `notes` 永远优先放在摘要最前面；钉住要点不裁剪；未完成事项单独成段；
+- 含钉住/待办/阻塞的记录不会被 `maxAgeDays` / `maxSessions` 普通裁剪删除；
 
 ### 4.5 交互习惯
 
@@ -274,9 +277,10 @@ collectRecords(ws, selfId, includeSelf)
 ### 4.8 工具与命令
 
 - `persona_save`：写当前工作区的 `personaRootFor(cwd)/current.md`，同时生成版本并裁剪旧版本；
-- `memory_save`：写入当前 entry 的 `notes`，并触发保存；
-- `memory_recall`：扫描同 cwd 的 record digest/notes，返回匹配片段；
-- `/memory` 命令：status/show/path/preview/clear/habits/identity/persona；
+- `memory_save`：写入当前 entry 的 `notes` 或 `openItems`（带 `why`/`pinned`），并触发保存；
+- `memory_pin` / `memory_resolve`：钉住/取消钉住、完成待办；
+- `memory_recall`：扫描同 cwd 的 record digest/notes/openItems，返回匹配片段；
+- `/memory` 命令：status/show/path/preview/clear/todo/pins/pin/unpin/resolve/habits/identity/persona；
 - `/memory habits on|off`：通过 `ctx.settings.update` 写 profile 配置，失败则只改运行期；
 - `/memory identity [show|path|import]`：查看当前工作区身份，或从模板导入；
 - `/memory persona [show|versions|clear]`：查看/列出/清除当前工作区人格记忆；
@@ -385,6 +389,7 @@ props.form
 | 身份 100 < 人格 150 < 习惯 280 < 事实 300 | `renderPrompt` 按 order 拼接，保证人格数据先于工作数据 |
 | 人格与工作**目录/命令/清除分离** | 人格可独立备份/回滚，工作数据可独立清理 |
 | 人格摘要**整体替换 + 版本化 + 上限** | 防止人格数据无限增长；旧版本可回滚 |
+| 钉住/未完成事项跳过普通裁剪 | 用户显式保留的条目和待办不随时间/数量上限消失 |
 | 记录在 `turn/end` 保存 | 回合边界稳定，不打断流式输出 |
 | 写入用临时文件 + rename | 避免半截 JSON |
 | notes 跨重载合并 | notes 不在会话日志里，重载会丢；合并修复 |
@@ -497,7 +502,7 @@ ctx.on('session/event')
 | 想改什么 | 改哪里 |
 |---|---|
 | 增加配置项 | `Config` schema + `readConfig` + 客户端表单（可选） |
-| 调整事实压缩 | `buildDigest` |
+| 调整事实压缩 | `memory.js` 的 `buildDigest` / `capNotes` / `capOpenItems` |
 | 调整习惯规则 | `noteUserText` / `noteAssistantText` / `noteToolCall` / `buildHabitSummary` |
 | 改习惯保留份数 | `writeHabitFile`（当前固定 2） |
 | 改存储路径/格式 | `loadWorkspace` / `saveEntry` / `queueWrite` |
