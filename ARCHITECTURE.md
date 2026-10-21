@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）插件架构
 
-适用版本：**1.3.1**
+适用版本：**1.3.2**
 源码目录：`<repo>`
 配套文档：[USAGE.md](USAGE.md)（怎么用）、[README.md](README.md)（配置速查）
 
@@ -279,7 +279,7 @@ collectRecords(ws, selfId, includeSelf)
 - `/memory persona [show|versions|clear]`：查看/列出/清除人格记忆；
 - `/memory workspaces`：列出其他工作区；`/memory cross <query>`：检索其他工作区工作事实；
 - `memory_recall(scope:'all')`：跨工作区检索，只读工作事实，绝不读取身份/人格；
-- 跨工作区允许列表：`crossWorkspaceAllowlist`（cwd 数组，空 = 全部），设置页多选窗口选择。
+- 跨工作区允许列表：`crossWorkspaceAllowlist`（cwd 数组，空 = 不共享），设置页多选窗口选择。
 
 ---
 

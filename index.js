@@ -692,8 +692,9 @@ export function apply(ctx, config) {
       try {
         const data = JSON.parse(await readFile(file, 'utf8'));
         if (!data || data.version !== FORMAT_VERSION || !data.sessions || typeof data.sessions !== 'object') continue;
-        if (cfg.crossWorkspaceAllowlist.length > 0
-          && (typeof data.cwd !== 'string' || !cfg.crossWorkspaceAllowlist.includes(normalizeCwd(data.cwd)))) {
+        // Empty allowlist means no cross-workspace sharing: the user must pick
+        // workspaces explicitly in the settings window.
+        if (typeof data.cwd !== 'string' || !cfg.crossWorkspaceAllowlist.includes(normalizeCwd(data.cwd))) {
           continue;
         }
         const records = Object.values(data.sessions)

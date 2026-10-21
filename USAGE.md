@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）使用文档
 
-适用版本：**1.3.1**（Windows / macOS / Linux）
+适用版本：**1.3.2**（Windows / macOS / Linux）
 插件包：`dsh-session-memory`
 源码目录：`<repo>`
 
@@ -178,7 +178,7 @@
 - `crossWorkspaceAttach` 开启时，新会话在事实之后（order **310**）自动注入最近的其他工作区摘要；
 - 设置页「选择工作区…」打开多选窗口，勾选允许共享的工作区。
 
-选区语义：`crossWorkspaceAllowlist` 为空 = 允许全部（总开关仍生效）；非空 = 只允许列出的工作区。
+选区语义：`crossWorkspaceAllowlist` 为空 = **不共享任何其他工作区**；非空 = 只允许列出的工作区。
 
 隐私边界：
 
@@ -318,7 +318,7 @@
     personaKeepVersions: 5 # 保留最近几个人格版本
     crossWorkspaceEnabled: false # 允许读取其他工作区工作记录
     crossWorkspaceAttach: false  # 新会话自动注入其他工作区摘要
-    crossWorkspaceAllowlist: []  # 允许的工作区 cwd；空 = 全部
+    crossWorkspaceAllowlist: []  # 允许的工作区 cwd；空 = 不共享
     crossWorkspaceMaxChars: 1500
     crossWorkspaceSessions: 3
     autoAttach: true       # 新会话自动接入
@@ -347,7 +347,7 @@
 ### 10.2 页面显示“该 Host 条目未加载，暂时无法配置”
 
 1. 先试 **内置插件配置 → 人格、身份与工作**（入口 B）；
-2. 确认安装的是 **1.3.1** 或更新版本；
+2. 确认安装的是 **1.3.2** 或更新版本；
 3. 安装/升级后需**完全退出并重开 DSH**，刷新页面不够；
 4. 若两个入口仍不可用，请记录当前版本与页面提示，交给维护者排查。
 
