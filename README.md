@@ -78,7 +78,10 @@
 - `memory_recall(scope: 'all')` 可检索其他工作区的工作事实；
 - `/memory workspaces` 列出其他工作区；
 - `/memory cross <query>` 检索其他工作区；
+- 设置页「选择工作区…」打开多选窗口，勾选允许共享的工作区；
 - `crossWorkspaceAttach` 开启时，新会话在事实之后（order **310**）自动注入最近的其他工作区工作记录。
+
+选区语义：`crossWorkspaceAllowlist` 为空 = 允许全部（总开关仍生效）；非空 = 只允许列出的工作区。
 
 隐私边界：跨工作区只读取 `<工作存储>/*.json` 中的工作事实，**绝不读取**身份文件或 `<personaDirectory>`；人格记忆不会被复制进工作文件，也不会出现在跨工作区结果里。工作事实本身可能包含项目敏感信息，开启前请确认。
 
@@ -103,7 +106,7 @@
 - **身份 INI 文件**：绝对路径；
 - **人格目录**：`current.md` 与 `versions/` 的位置；
 - **工作存储目录**：事实 JSON 与习惯 txt 的位置；
-- **跨工作区**：允许读取其他工作区 / 自动注入；
+- **跨工作区**：允许读取其他工作区 / 自动注入 / **选择工作区…**（多选窗口）；
 - **归纳交互习惯**：开关；
 - **保存**：写入 profile 配置。
 
@@ -141,6 +144,7 @@
     personaKeepVersions: 5      # 保留最近几个版本
     crossWorkspaceEnabled: false # 允许读取其他工作区工作记录
     crossWorkspaceAttach: false  # 新会话自动注入其他工作区摘要
+    crossWorkspaceAllowlist: []  # 允许的工作区 cwd；空 = 全部
     crossWorkspaceMaxChars: 1500
     crossWorkspaceSessions: 3
     directory: ''               # 工作存储；留空 $DSH_HOME/context-memory

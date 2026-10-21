@@ -36,6 +36,19 @@ window.__ModuleLoader__.load({
       crossAllowHint: 'Work facts only. Identity and persona data are never shared.',
       crossAttach: 'Auto-inject recent records from other workspaces',
       crossAttachHint: 'Adds a separate section after the current facts; off by default.',
+      crossPicker: 'Choose workspaces…',
+      crossPickerTitle: 'Choose workspaces to share work memory',
+      crossPickerHint: 'Only selected workspaces are readable across workspaces. Leave all unchecked to allow all (master switch still applies). Identity and persona are never shared.',
+      crossSelectAll: 'Select all',
+      crossClearAll: 'Clear all',
+      crossNoWorkspaces: 'No registered workspaces were found. Add a path manually below.',
+      crossManual: 'Add a path',
+      crossManualPlaceholder: 'D:\\path\\to\\workspace',
+      crossAdd: 'Add',
+      crossSelected: 'Selected: {count}',
+      crossEmpty: 'No selection means all workspaces (master switch still applies).',
+      cancel: 'Cancel',
+      apply: 'Apply',
       habitsTitle: 'Interaction habits',
       habits: 'Summarize interaction habits',
       habitsHint: 'Keeps at most two concise txt summaries per workspace and restores habits before facts in the next session.',
@@ -75,6 +88,19 @@ window.__ModuleLoader__.load({
       crossAllowHint: '只共享工作事实；身份与人格数据永远不会被共享。',
       crossAttach: '自动注入其他工作区的最近记录',
       crossAttachHint: '在当前事实之后追加独立段落；默认关闭。',
+      crossPicker: '选择工作区…',
+      crossPickerTitle: '选择允许共享工作记忆的工作区',
+      crossPickerHint: '只有选中的工作区可被跨工作区读取；全部不选表示允许全部（总开关仍然生效）。身份与人格数据永远不会共享。',
+      crossSelectAll: '全选',
+      crossClearAll: '清空',
+      crossNoWorkspaces: '未找到已注册的工作区；可在下方手动添加路径。',
+      crossManual: '添加路径',
+      crossManualPlaceholder: 'D:\\path\\to\\workspace',
+      crossAdd: '添加',
+      crossSelected: '已选择：{count}',
+      crossEmpty: '不选表示允许全部工作区（总开关仍然生效）。',
+      cancel: '取消',
+      apply: '确定',
       habitsTitle: '交互习惯',
       habits: '归纳交互习惯',
       habitsHint: '每个工作区最多保留两份简短的 txt 总结；下一个会话会先恢复习惯，再恢复事实。',
@@ -143,7 +169,165 @@ window.__ModuleLoader__.load({
       },
       status: { minHeight: '18px', color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' },
       checkboxRow: { display: 'flex', gap: '8px', alignItems: 'flex-start' },
+      overlay: {
+        position: 'fixed',
+        inset: 0,
+        zIndex: 1000,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '24px',
+        background: 'rgba(0, 0, 0, 0.45)',
+      },
+      dialog: {
+        width: 'min(620px, 100%)',
+        maxHeight: '82vh',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '12px',
+        padding: '18px',
+        borderRadius: '12px',
+        border: '1px solid var(--dsw-alias-border-l1)',
+        background: 'var(--dsw-alias-bg-overlay)',
+        color: 'var(--dsw-alias-label-primary)',
+        boxShadow: '0 18px 60px rgba(0, 0, 0, 0.35)',
+      },
+      modalHead: { margin: 0, fontSize: '15px', fontWeight: '600' },
+      modalList: {
+        display: 'grid',
+        gap: '4px',
+        maxHeight: '42vh',
+        overflowY: 'auto',
+        padding: '4px',
+        border: '1px solid var(--dsw-alias-border-l1)',
+        borderRadius: '8px',
+        background: 'var(--dsw-alias-bg-layer-1)',
+      },
+      option: {
+        display: 'flex',
+        gap: '8px',
+        alignItems: 'flex-start',
+        padding: '6px 8px',
+        borderRadius: '6px',
+      },
+      modalFooter: { display: 'flex', justifyContent: 'flex-end', gap: '8px', flexWrap: 'wrap' },
     };
+
+    function workspaceOptionsFrom(snapshot) {
+      const raw = snapshot?.workspaces ?? snapshot?.items ?? snapshot?.list ?? snapshot;
+      if (!Array.isArray(raw)) return [];
+      const seen = new Set();
+      const options = [];
+      for (const item of raw) {
+        const path = item?.path ?? item?.cwd ?? item?.root ?? item?.directory;
+        if (typeof path !== 'string' || path.trim().length === 0) continue;
+        const key = path.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        options.push({
+          path,
+          label: item?.title ?? item?.name ?? path,
+        });
+      }
+      return options;
+    }
+
+    function WorkspacePickerDialog({ useWorkspaces, selected, onApply, onClose, t }) {
+      const snapshot = typeof useWorkspaces === 'function' ? useWorkspaces((value) => value) : undefined;
+      const options = React.useMemo(() => workspaceOptionsFrom(snapshot), [snapshot]);
+      const [draft, setDraft] = React.useState(selected);
+      const [manual, setManual] = React.useState('');
+      const has = (path) => draft.some((entry) => entry.toLowerCase() === path.toLowerCase());
+
+      React.useEffect(() => {
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') onClose();
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+      }, [onClose]);
+
+      const toggle = (path) => {
+        setDraft((previous) => (has(path)
+          ? previous.filter((entry) => entry.toLowerCase() !== path.toLowerCase())
+          : [...previous, path]));
+      };
+
+      const addManual = () => {
+        const value = manual.trim();
+        if (value.length === 0) return;
+        if (!has(value)) setDraft((previous) => [...previous, value]);
+        setManual('');
+      };
+
+      const list = options.length === 0
+        ? h('p', { style: styles.hint }, t('crossNoWorkspaces'))
+        : h('div', { style: styles.modalList },
+          options.map((option) => h('label', { key: option.path, style: styles.option },
+            h('input', {
+              type: 'checkbox',
+              checked: has(option.path),
+              onChange: () => toggle(option.path),
+            }),
+            h('span', { style: { display: 'grid', gap: '2px' } },
+              h('span', { style: styles.label }, option.label),
+              h('span', { style: { ...styles.hint, wordBreak: 'break-all' } }, option.path)))));
+
+      const controls = h('div', { style: styles.row },
+        h('button', {
+          type: 'button',
+          style: styles.button,
+          onClick: () => setDraft(options.map((option) => option.path)),
+        }, t('crossSelectAll')),
+        h('button', {
+          type: 'button',
+          style: styles.button,
+          onClick: () => setDraft([]),
+        }, t('crossClearAll')));
+
+      const manualRow = h('div', { style: styles.field },
+        h('span', { style: styles.label }, t('crossManual')),
+        h('div', { style: styles.row },
+          h('input', {
+            type: 'text',
+            value: manual,
+            spellCheck: false,
+            placeholder: t('crossManualPlaceholder'),
+            style: { ...styles.input, flex: '1 1 260px' },
+            onChange: (event) => setManual(event.target.value),
+            onKeyDown: (event) => {
+              if (event.key === 'Enter') addManual();
+            },
+          }),
+          h('button', { type: 'button', style: styles.button, onClick: addManual }, t('crossAdd'))));
+
+      const footer = h('div', { style: styles.modalFooter },
+        h('span', { style: styles.hint }, t('crossSelected', { count: draft.length })),
+        h('button', { type: 'button', style: styles.button, onClick: onClose }, t('cancel')),
+        h('button', {
+          type: 'button',
+          style: styles.primary,
+          onClick: () => onApply(draft),
+        }, t('apply')));
+
+      return h('div', {
+        style: styles.overlay,
+        onMouseDown: (event) => {
+          if (event.target === event.currentTarget) onClose();
+        },
+      }, h('div', {
+        style: styles.dialog,
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-label': t('crossPickerTitle'),
+      },
+        h('h3', { style: styles.modalHead }, t('crossPickerTitle')),
+        h('p', { style: styles.hint }, t('crossPickerHint')),
+        controls,
+        list,
+        manualRow,
+        footer));
+    }
 
     function SessionMemoryPage(props) {
       const { view } = props;
@@ -162,6 +346,9 @@ window.__ModuleLoader__.load({
       const storedPersona = typeof value.personaDirectory === 'string' ? value.personaDirectory : '';
       const storedCross = value.crossWorkspaceEnabled === true;
       const storedCrossAttach = value.crossWorkspaceAttach === true;
+      const storedAllowlist = Array.isArray(value.crossWorkspaceAllowlist)
+        ? value.crossWorkspaceAllowlist.filter((entry) => typeof entry === 'string' && entry.length > 0)
+        : [];
 
       const [directory, setDirectory] = React.useState(storedDirectory);
       const [habits, setHabits] = React.useState(storedHabits);
@@ -169,6 +356,8 @@ window.__ModuleLoader__.load({
       const [personaDirectory, setPersonaDirectory] = React.useState(storedPersona);
       const [cross, setCross] = React.useState(storedCross);
       const [crossAttach, setCrossAttach] = React.useState(storedCrossAttach);
+      const [allowlist, setAllowlist] = React.useState(storedAllowlist);
+      const [pickerOpen, setPickerOpen] = React.useState(false);
       const [busy, setBusy] = React.useState(false);
       const [status, setStatus] = React.useState('');
 
@@ -179,14 +368,16 @@ window.__ModuleLoader__.load({
         setPersonaDirectory(storedPersona);
         setCross(storedCross);
         setCrossAttach(storedCrossAttach);
-      }, [storedDirectory, storedHabits, storedIdentity, storedPersona, storedCross, storedCrossAttach, revision]);
+        setAllowlist(storedAllowlist);
+      }, [storedDirectory, storedHabits, storedIdentity, storedPersona, storedCross, storedCrossAttach, JSON.stringify(storedAllowlist), revision]);
 
       const dirty = directory !== storedDirectory
         || habits !== storedHabits
         || identityFile !== storedIdentity
         || personaDirectory !== storedPersona
         || cross !== storedCross
-        || crossAttach !== storedCrossAttach;
+        || crossAttach !== storedCrossAttach
+        || allowlist.join('\n') !== storedAllowlist.join('\n');
       const disabled = !writable || busy;
       const root = directory.trim().length > 0 ? directory.trim().replace(/[\\/]+$/u, '') : '';
       const personaRoot = personaDirectory.trim().length > 0 ? personaDirectory.trim().replace(/[\\/]+$/u, '') : '';
@@ -200,6 +391,7 @@ window.__ModuleLoader__.load({
         if (personaDirectory !== storedPersona) ops.push({ op: 'set', path: ['personaDirectory'], value: personaDirectory.trim() });
         if (cross !== storedCross) ops.push({ op: 'set', path: ['crossWorkspaceEnabled'], value: cross });
         if (crossAttach !== storedCrossAttach) ops.push({ op: 'set', path: ['crossWorkspaceAttach'], value: crossAttach });
+        if (allowlist.join('\n') !== storedAllowlist.join('\n')) ops.push({ op: 'set', path: ['crossWorkspaceAllowlist'], value: allowlist });
         if (ops.length === 0) return;
         setBusy(true);
         setStatus('');
@@ -314,6 +506,15 @@ window.__ModuleLoader__.load({
             }),
             h('span', { style: styles.label }, t('crossAllow'))),
           h('p', { style: styles.hint }, t('crossAllowHint')),
+          h('div', { style: styles.row },
+            h('button', {
+              type: 'button',
+              style: styles.button,
+              disabled: disabled || !cross,
+              onClick: () => setPickerOpen(true),
+            }, t('crossPicker')),
+            h('span', { style: styles.hint }, allowlist.length > 0 ? t('crossSelected', { count: allowlist.length }) : t('crossEmpty'))),
+          allowlist.length > 0 ? h('div', { style: styles.mono }, allowlist.join('\n')) : null,
           h('label', { style: styles.checkboxRow },
             h('input', {
               type: 'checkbox',
@@ -342,6 +543,16 @@ window.__ModuleLoader__.load({
             onClick: save,
           }, busy ? t('saving') : t('save')),
           h('span', { style: styles.status }, writable ? status : t('readOnly'))),
+        pickerOpen ? h(WorkspacePickerDialog, {
+          useWorkspaces: props.useWorkspaces,
+          selected: allowlist,
+          t,
+          onApply: (next) => {
+            setAllowlist(next);
+            setPickerOpen(false);
+          },
+          onClose: () => setPickerOpen(false),
+        }) : null,
       );
     }
 

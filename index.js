@@ -55,6 +55,7 @@ export const Config = z.object({
   personaKeepVersions: z.number().min(1).max(20).default(5),
   crossWorkspaceEnabled: z.boolean().default(false),
   crossWorkspaceAttach: z.boolean().default(false),
+  crossWorkspaceAllowlist: z.array(z.string()).default([]),
   crossWorkspaceMaxChars: z.number().min(300).max(4000).default(1500),
   crossWorkspaceSessions: z.number().min(1).max(10).default(3),
 });
@@ -102,6 +103,11 @@ function readConfig(raw) {
     personaKeepVersions: clampInt(source.personaKeepVersions, 5, 1, 20),
     crossWorkspaceEnabled: source.crossWorkspaceEnabled === true,
     crossWorkspaceAttach: source.crossWorkspaceAttach === true,
+    crossWorkspaceAllowlist: Array.isArray(source.crossWorkspaceAllowlist)
+      ? source.crossWorkspaceAllowlist
+        .filter((entry) => typeof entry === 'string' && entry.trim().length > 0)
+        .map((entry) => normalizeCwd(entry.trim()))
+      : [],
     crossWorkspaceMaxChars: clampInt(source.crossWorkspaceMaxChars, 1500, 300, 4000),
     crossWorkspaceSessions: clampInt(source.crossWorkspaceSessions, 3, 1, 10),
   };
@@ -686,6 +692,10 @@ export function apply(ctx, config) {
       try {
         const data = JSON.parse(await readFile(file, 'utf8'));
         if (!data || data.version !== FORMAT_VERSION || !data.sessions || typeof data.sessions !== 'object') continue;
+        if (cfg.crossWorkspaceAllowlist.length > 0
+          && (typeof data.cwd !== 'string' || !cfg.crossWorkspaceAllowlist.includes(normalizeCwd(data.cwd)))) {
+          continue;
+        }
         const records = Object.values(data.sessions)
           .filter((record) => typeof record?.digest === 'string'
             && record.digest.trim().length > 0
