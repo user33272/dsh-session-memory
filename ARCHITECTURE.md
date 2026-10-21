@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）插件架构
 
-适用版本：**1.1.0**
+适用版本：**1.2.0**
 源码目录：`<repo>`
 配套文档：[USAGE.md](USAGE.md)（怎么用）、[README.md](README.md)（配置速查）
 
@@ -10,8 +10,8 @@
 
 这是一个 **Cordis 双半插件**：
 
-- **Host 半**（Node）负责记录会话、压缩事实、归纳习惯、读取身份 INI、写本地文件、在下一个会话注入 system prompt；
-- **Client 半**（浏览器）只负责在 Plugins 页面渲染设置表单，把「身份文件 / 存储根目录 / 习惯开关」写回 profile 配置。
+- **Host 半**（Node）负责记录会话、压缩事实、归纳习惯、读取身份 INI、管理有上限的人格记忆、写本地文件、在下一个会话注入 system prompt；
+- **Client 半**（浏览器）只负责在 Plugins 页面渲染设置表单，把「身份文件 / 人格目录 / 工作目录 / 习惯开关」写回 profile 配置。
 
 两者通过 **同一个包名** `dsh-session-memory` 绑定：`package.json` 的 `dsh.bundle.patch` 挂 Host 行，`dsh.client` 挂浏览器模块。
 
@@ -25,9 +25,10 @@
   cordis.patch.yml      # 向 profile 插入 session-memory 这一行
   index.js              # Host 半（Cordis 插件）
   identity.js           # INI 解析与身份层渲染（纯函数）
+  persona.js            # 人格记忆读写、版本化、裁剪（纯文件操作）
   client.js             # Client 半（浏览器模块）
-  examples/             # identity.example.ini
-  test/                 # identity.test.mjs
+  examples/             # identity.example.ini / persona.example.md
+  test/                 # identity.test.mjs / persona.test.mjs
   locale/en.json        # 插件显示名/描述（英文）
   locale/zh.json        # 插件显示名/描述（中文）
   icon.svg              # 插件图标
@@ -41,7 +42,7 @@
 ```
 <DSH_HOME>\profiles\<profile>\
   node_modules\dsh-session-memory\      # 打包安装后的真实目录
-  cordis.patch.yml                      # 可能写入 identityFile / directory / habitsEnabled 覆盖
+  cordis.patch.yml                      # 可能写入 identityFile / personaDirectory / directory / habitsEnabled 覆盖
 ```
 
 Host 行在 Loader 中的身份：
@@ -64,16 +65,19 @@ Host 行在 Loader 中的身份：
 │                                                                                  │
 │  session/event ──► ingest() ──► entries（内存态：items/goals/notes/style）        │
 │                                                                                  │
-│  turn/end ───────► saveEntry() ──┬─► <root>/<workspaceKey>.json   （事实）        │
-│                                  └─► <root>/habits/<key>.1/.2.txt （习惯）        │
+│  turn/end ───────► saveEntry() ──┬─► <work>/<workspaceKey>.json   （事实）        │
+│                                  └─► <work>/habits/<key>.1/.2.txt （习惯）        │
 │                                                                                  │
-│  agent/created ──► attachIdentity() ──► order 100：身份（全局，INI）                │
-│     (root agents)  attachMemory()  ──► order 280 习惯 / 300 事实                   │
+│  persona_save ───► <persona>/current.md + versions/（有上限、迭代）                │
 │                                                                                  │
-│  tools：memory_save / memory_recall      commands：/memory ...                    │
+│  agent/created ──► attachIdentity() ──► order 100：身份（INI）                     │
+│     (root agents)  attachPersona()  ──► order 150：人格记忆（current.md）          │
+│                    attachMemory()   ──► order 280 习惯 / 300 事实                  │
+│                                                                                  │
+│  tools：persona_save / memory_save / memory_recall   commands：/memory ...         │
 │                                                                                  │
 └───────────────────────────────┬──────────────────────────────────────────────────┘
-                                │ profile 配置（identityFile、directory、habitsEnabled）
+                                │ profile 配置（identityFile、personaDirectory、directory、habitsEnabled）
 ┌───────────────────────────────▼──────────── DSH Web Client（浏览器）──────────────┐
 │  client.js                                                                        │
 │    └─ plugins.row.config（两个候选 key） ─┐                                        │
@@ -116,6 +120,9 @@ Host 行在 Loader 中的身份：
   ├─ attachIdentity()
   │    ├─ readFile(identityFile) → parseIni() → buildIdentityText()
   │    └─ systemPrompt.section({name:'context-memory:identity', order:100})
+  ├─ attachPersona()
+  │    ├─ readPersona(personaDirectory) → current.md
+  │    └─ systemPrompt.section({name:'context-memory:persona', order:150})
   └─ attachMemory()（仅 startup / clear）
        ├─ readHabitFile()  → 读 .1.txt（缺失回退 .2.txt）
        ├─ renderFacts()    → 最近会话的 digest
@@ -247,6 +254,9 @@ collectRecords(ws, selfId, includeSelf)
   │    ├─ readFile(identityFile)
   │    ├─ identityFromText(text, identityMaxChars)
   │    └─ systemPrompt.section({name:'context-memory:identity', order:100})
+  ├─ attachPersona()（所有根代理，含 resume）
+  │    ├─ readPersona(personaDirectory) → current.md
+  │    └─ systemPrompt.section({name:'context-memory:persona', order:150})
   └─ attachMemory()（仅 startup / clear）
        ├─ 读同 cwd 最近的 records（默认 1 个）
        ├─ 读 habits/.1.txt
@@ -254,16 +264,18 @@ collectRecords(ws, selfId, includeSelf)
        └─ systemPrompt.section({name:'context-memory:carryover', order:300})
 ```
 
-`renderPrompt` 按 order 拼接：身份 100 → 习惯 280 → 事实 300。
-`resume` 的旧会话只恢复身份层，不重复接入习惯/事实；子代理不参与。
+`renderPrompt` 按 order 拼接：身份 100 → 人格 150 → 习惯 280 → 事实 300。
+`resume` 的旧会话恢复身份 + 人格，不重复接入习惯/事实；子代理不参与。
 
 ### 4.8 工具与命令
 
+- `persona_save`：写 `<personaDirectory>/current.md`，同时生成版本并裁剪旧版本；
 - `memory_save`：写入当前 entry 的 `notes`，并触发保存；
 - `memory_recall`：扫描同 cwd 的 record digest/notes，返回匹配片段；
-- `/memory` 命令：status/show/path/preview/clear/habits/identity；
+- `/memory` 命令：status/show/path/preview/clear/habits/identity/persona；
 - `/memory habits on|off`：通过 `ctx.settings.update` 写 profile 配置，失败则只改运行期；
-- `/memory identity [show|path]`：查看解析后的身份层或文件路径。
+- `/memory identity [show|path]`：查看解析后的身份层或文件路径；
+- `/memory persona [show|versions|clear]`：查看/列出/清除人格记忆。
 
 ---
 
@@ -363,7 +375,9 @@ props.form
 | 习惯用**规则**而不是 LLM | 零额外 token、离线、稳定；适合简短 txt |
 | 只保留**两份**习惯 | 防止无限增长；内容不变不重复写 |
 | 注入用 **system prompt section** 而非 user message | 每次请求都可见、顺序可控、可随 agent 生命周期销毁 |
-| 身份 100 < 习惯 280 < 事实 300 | `renderPrompt` 按 order 拼接，保证“先身份、再习惯、后事实” |
+| 身份 100 < 人格 150 < 习惯 280 < 事实 300 | `renderPrompt` 按 order 拼接，保证人格数据先于工作数据 |
+| 人格与工作**目录/命令/清除分离** | 人格可独立备份/回滚，工作数据可独立清理 |
+| 人格摘要**整体替换 + 版本化 + 上限** | 防止人格数据无限增长；旧版本可回滚 |
 | 记录在 `turn/end` 保存 | 回合边界稳定，不打断流式输出 |
 | 写入用临时文件 + rename | 避免半截 JSON |
 | notes 跨重载合并 | notes 不在会话日志里，重载会丢；合并修复 |
@@ -445,11 +459,12 @@ ctx.on('session/event')
 
 ### 第 9 步：用运行时验证理解
 
-- `/memory status`：看路径、身份/习惯开关、记录数；
+- `/memory status`：看身份/人格/工作三套路径、大小、记录数；
 - `/memory identity`：看解析后的身份层；
-- `/memory show`：看身份 + 习惯 + 事实；
+- `/memory persona`：看人格记忆大小与版本；
+- `/memory show`：看身份 + 人格 + 习惯 + 事实；
 - `/memory preview`：看“下一次会话到底会注入什么、顺序如何”；
-- 直接打开 `<root>/<key>.json` 和 `habits/<key>.1.txt` 对照代码。
+- 直接打开 `<work>/<key>.json`、`habits/<key>.1.txt`、`<persona>/current.md` 对照代码。
 
 ---
 
@@ -463,6 +478,8 @@ ctx.on('session/event')
 | 插件行是否 active | `plugin_manager list_plugins`，找 `include:session-memory` |
 | 习惯文件 | 打开 `<root>/habits/<key>.1.txt` |
 | 事实文件 | 打开 `<root>/<key>.json` |
+| 人格文件 | 打开 `<persona>/current.md` 与 `versions/` |
+| 人格写入 | 模型工具 `persona_save`，或 `/memory persona` |
 | 注入内容 | `/memory preview` |
 | 日志 | Host 日志中以 `session-memory:` 开头的 warn |
 
@@ -477,8 +494,9 @@ ctx.on('session/event')
 | 调整习惯规则 | `noteUserText` / `noteAssistantText` / `noteToolCall` / `buildHabitSummary` |
 | 改习惯保留份数 | `writeHabitFile`（当前固定 2） |
 | 改存储路径/格式 | `loadWorkspace` / `saveEntry` / `queueWrite` |
-| 改注入顺序 | `IDENTITY_ORDER` / `HABITS_ORDER` / `FACTS_ORDER` 与 `attachIdentity` / `attachMemory` |
+| 改注入顺序 | `IDENTITY_ORDER` / `PERSONA_ORDER` / `HABITS_ORDER` / `FACTS_ORDER` 与 `attachIdentity` / `attachPersona` / `attachMemory` |
 | 改身份解析/渲染 | `identity.js` 的 `parseIni` / `buildIdentityText` |
+| 改人格存储/版本化 | `persona.js` 的 `readPersona` / `writePersona` / `listPersonaVersions` / `clearPersona` |
 | 加模型工具 | `ctx.tools.register` |
 | 加命令 | `ctx.commands.register` |
 | 改设置页 | `client.js` 的 `SessionMemoryPage` 与槽注册 |
@@ -493,12 +511,13 @@ ctx.on('session/event')
 ## 11. 边界与限制
 
 - 身份层是规则解析的静态设定，不会让模型获得文件之外的真实记忆；
+- 人格记忆是**有上限的迭代摘要**（`personaMaxChars`），旧版本只保留最近 `personaKeepVersions` 个，不是完整自传；
 - 习惯是规则推断，不调用模型，不能理解复杂偏好；
 - 事实摘要按窗口滚动，早期内容会被省略（保留早期目标和最近对话）；
 - 习惯只注入最新一份，`.2.txt` 仅作备份/回退；
-- 更改存储根目录不迁移旧数据；
+- 更改身份/人格/工作目录都不迁移旧数据；
 - 浏览器半在安装/升级后需要重启 DSH 才能加载；
-- 子代理会话完全跳过；`resume` 只恢复身份层，不重复习惯/事实。
+- 子代理会话完全跳过；`resume` 恢复身份 + 人格，不重复习惯/事实。
 
 ---
 
@@ -513,6 +532,7 @@ ctx.on('session/event')
 | profile | 当前桌面配置目录 `<DSH_HOME>\profiles\<profile>` |
 | workspaceKey | `sha1(规范化 cwd)` 前 16 位，用于按工作区分文件 |
 | system prompt section | 每次模型请求都会组装的系统提示段落 |
-| identity layer | 全局 INI 身份设定，order 100，先于习惯和事实 |
+| identity layer | 全局 INI 身份设定，order 100，先于人格/习惯/事实 |
+| persona memory | 全局、有上限、版本化的人格/关系摘要，order 150 |
 | slot | 客户端 UI 的扩展点；本插件用 `plugins.row.config` / `plugins.item` |
 | configForms | 浏览器端共享的配置表单服务，按 settings ns 提供快照与写入 |

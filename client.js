@@ -9,23 +9,28 @@ window.__ModuleLoader__.load({
     const ROW = 'session-memory';
 
     const en = {
-      summary: 'Records local session memory, identity, and interaction habits; restores identity, habits, then facts.',
-      title: 'Identity, storage and habits',
-      storageTitle: 'Storage',
-      directory: 'Storage root directory',
-      directoryHint: 'All local data is written under this directory: fact memory and the two habit txt files. Leave blank to use the default $DSH_HOME/context-memory.',
+      summary: 'Separates global persona memory from per-workspace work memory; injects identity, persona, habits, then facts.',
+      title: 'Persona, identity and work',
+      storageTitle: 'Work storage',
+      directory: 'Work storage directory',
+      directoryHint: 'Per-workspace facts and habit txt files only. Leave blank to use the default $DSH_HOME/context-memory.',
       browse: 'Browse…',
       reset: 'Use default',
       defaultPath: 'default ($DSH_HOME/context-memory)',
-      derived: 'Derived files',
+      derived: 'Work files',
       factsFile: 'Facts: <root>/<workspace>.json',
       habitsFile: 'Habits: <root>/habits/<workspace>.1.txt (latest)',
       habitsBackup: 'Habits backup: <root>/habits/<workspace>.2.txt (previous)',
       migration: 'Changing the directory affects only data written afterwards. Existing files are not moved automatically.',
       identityTitle: 'Identity',
       identityFile: 'Identity INI file',
-      identityHint: 'Optional. An INI persona file, injected before habits and facts. Leave blank to disable the identity layer.',
+      identityHint: 'Optional. An INI persona charter, injected before persona memory, habits, and facts. Leave blank to disable it.',
       identityPlaceholder: 'D:\\path\\to\\persona.zh-cn.ini',
+      personaTitle: 'Persona memory',
+      personaDirectory: 'Persona directory',
+      personaHint: 'Global, bounded self/relationship memory: current.md plus versioned iterations. Separate from work memory.',
+      personaDefaultPath: 'default ($DSH_HOME/persona)',
+      personaDerived: 'Persona: <root>/current.md · versions/',
       habitsTitle: 'Interaction habits',
       habits: 'Summarize interaction habits',
       habitsHint: 'Keeps at most two concise txt summaries per workspace and restores habits before facts in the next session.',
@@ -38,23 +43,28 @@ window.__ModuleLoader__.load({
     };
 
     const zh = {
-      summary: '本地记录会话事实、身份层与交互习惯；接入时按身份、习惯、事实的顺序恢复。',
-      title: '身份、存储与交互习惯',
-      storageTitle: '存储',
-      directory: '存储根目录',
-      directoryHint: '所有本地数据都写入该目录：事实记忆与两份习惯 txt 文件。留空使用默认目录 $DSH_HOME/context-memory。',
+      summary: '人格记忆与工作记忆分开存储；按身份、人格、习惯、事实的顺序接入。',
+      title: '人格、身份与工作',
+      storageTitle: '工作存储',
+      directory: '工作存储目录',
+      directoryHint: '只放当前工作区的事实与习惯 txt 文件；留空使用默认目录 $DSH_HOME/context-memory。',
       browse: '浏览…',
       reset: '恢复默认',
       defaultPath: '默认（$DSH_HOME/context-memory）',
-      derived: '派生文件',
+      derived: '工作文件',
       factsFile: '事实：<root>/<工作区>.json',
       habitsFile: '习惯：<root>/habits/<工作区>.1.txt（最新）',
       habitsBackup: '习惯备份：<root>/habits/<工作区>.2.txt（上一次）',
       migration: '更改目录只影响之后写入的数据，旧目录中的文件不会自动迁移。',
       identityTitle: '身份层',
       identityFile: '身份 INI 文件',
-      identityHint: '可选。INI 人格文件，会在交互习惯和会话事实之前注入；留空关闭身份层。',
+      identityHint: '可选。INI 人格设定，会在人格记忆、交互习惯和会话事实之前注入；留空关闭身份层。',
       identityPlaceholder: 'D:\\path\\to\\persona.zh-cn.ini',
+      personaTitle: '人格记忆',
+      personaDirectory: '人格目录',
+      personaHint: '全局、有上限的自我/关系记忆：current.md 加迭代版本，与工作记忆分开管理。',
+      personaDefaultPath: '默认（$DSH_HOME/persona）',
+      personaDerived: '人格：<root>/current.md · versions/',
       habitsTitle: '交互习惯',
       habits: '归纳交互习惯',
       habitsHint: '每个工作区最多保留两份简短的 txt 总结；下一个会话会先恢复习惯，再恢复事实。',
@@ -139,10 +149,12 @@ window.__ModuleLoader__.load({
       const storedDirectory = typeof value.directory === 'string' ? value.directory : '';
       const storedHabits = value.habitsEnabled !== false;
       const storedIdentity = typeof value.identityFile === 'string' ? value.identityFile : '';
+      const storedPersona = typeof value.personaDirectory === 'string' ? value.personaDirectory : '';
 
       const [directory, setDirectory] = React.useState(storedDirectory);
       const [habits, setHabits] = React.useState(storedHabits);
       const [identityFile, setIdentityFile] = React.useState(storedIdentity);
+      const [personaDirectory, setPersonaDirectory] = React.useState(storedPersona);
       const [busy, setBusy] = React.useState(false);
       const [status, setStatus] = React.useState('');
 
@@ -150,11 +162,16 @@ window.__ModuleLoader__.load({
         setDirectory(storedDirectory);
         setHabits(storedHabits);
         setIdentityFile(storedIdentity);
-      }, [storedDirectory, storedHabits, storedIdentity, revision]);
+        setPersonaDirectory(storedPersona);
+      }, [storedDirectory, storedHabits, storedIdentity, storedPersona, revision]);
 
-      const dirty = directory !== storedDirectory || habits !== storedHabits || identityFile !== storedIdentity;
+      const dirty = directory !== storedDirectory
+        || habits !== storedHabits
+        || identityFile !== storedIdentity
+        || personaDirectory !== storedPersona;
       const disabled = !writable || busy;
       const root = directory.trim().length > 0 ? directory.trim().replace(/[\\/]+$/u, '') : '';
+      const personaRoot = personaDirectory.trim().length > 0 ? personaDirectory.trim().replace(/[\\/]+$/u, '') : '';
 
       async function save() {
         if (!dirty || disabled || typeof form.mutate !== 'function') return;
@@ -162,6 +179,7 @@ window.__ModuleLoader__.load({
         if (directory !== storedDirectory) ops.push({ op: 'set', path: ['directory'], value: directory.trim() });
         if (habits !== storedHabits) ops.push({ op: 'set', path: ['habitsEnabled'], value: habits });
         if (identityFile !== storedIdentity) ops.push({ op: 'set', path: ['identityFile'], value: identityFile.trim() });
+        if (personaDirectory !== storedPersona) ops.push({ op: 'set', path: ['personaDirectory'], value: personaDirectory.trim() });
         if (ops.length === 0) return;
         setBusy(true);
         setStatus('');
@@ -180,6 +198,16 @@ window.__ModuleLoader__.load({
         try {
           const picked = await props.pickDirectory();
           if (typeof picked === 'string' && picked.length > 0) setDirectory(picked);
+        } catch {
+          /* the picker may be unavailable in this deployment */
+        }
+      }
+
+      async function browsePersona() {
+        if (disabled || typeof props.pickDirectory !== 'function') return;
+        try {
+          const picked = await props.pickDirectory();
+          if (typeof picked === 'string' && picked.length > 0) setPersonaDirectory(picked);
         } catch {
           /* the picker may be unavailable in this deployment */
         }
@@ -230,6 +258,31 @@ window.__ModuleLoader__.load({
               onChange: (event) => setIdentityFile(event.target.value),
             }),
             h('p', { style: styles.hint }, t('identityHint')))),
+        h('section', { style: styles.section },
+          h('h3', { style: styles.heading }, t('personaTitle')),
+          h('div', { style: styles.field },
+            h('label', { style: styles.label, htmlFor: 'session-memory-persona' }, t('personaDirectory')),
+            h('input', {
+              id: 'session-memory-persona',
+              type: 'text',
+              value: personaDirectory,
+              disabled,
+              spellCheck: false,
+              placeholder: t('personaDefaultPath'),
+              style: styles.input,
+              onChange: (event) => setPersonaDirectory(event.target.value),
+            }),
+            h('div', { style: styles.row },
+              h('button', { type: 'button', style: styles.button, disabled, onClick: browsePersona }, t('browse')),
+              h('button', {
+                type: 'button',
+                style: styles.button,
+                disabled,
+                onClick: () => setPersonaDirectory(''),
+              }, t('reset'))),
+            h('p', { style: styles.hint }, t('personaHint')),
+            h('div', { style: styles.mono },
+              t('personaDerived').replace(/<root>/gu, personaRoot || t('personaDefaultPath'))))),
         h('section', { style: styles.section },
           h('h3', { style: styles.heading }, t('habitsTitle')),
           h('label', { style: styles.checkboxRow },

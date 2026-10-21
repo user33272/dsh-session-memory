@@ -1,15 +1,12 @@
 /**
  * Session Memory — a local, cross-session context keeper.
  *
- * Records the model-visible conversation of each workspace session, compresses
- * it into a bounded fact digest, derives a separate interaction-habit summary,
- * and attaches both to the next session opened in the same working directory:
- * habits first, facts second.
+ * Keeps three deliberately separate stores:
+ *   identity:   an external INI persona charter (read-only)
+ *   persona:    <personaDirectory>/current.md + versions/ (bounded self/relationship memory)
+ *   work:       <directory>/<workspaceKey>.json + habits/ (per-workspace facts/habits)
  *
- * Local data lives under one configurable root:
- *   <root>/<workspaceKey>.json            facts/dialogue compression
- *   <root>/habits/<workspaceKey>.1.txt    latest habit summary
- *   <root>/habits/<workspaceKey>.2.txt    previous habit summary
+ * Injection order: identity (100) → persona (150) → habits (280) → facts (300).
  *
  * @module dsh-session-memory
  */
@@ -19,19 +16,22 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { identityFromText } from './identity.js';
+import { clearPersona, listPersonaVersions, readPersona, writePersona } from './persona.js';
 
 export const name = 'session-memory';
 export const inject = ['systemPrompt', 'tools', 'sessions'];
 
 const IDENTITY_SECTION = 'context-memory:identity';
+const PERSONA_SECTION = 'context-memory:persona';
 const FACTS_SECTION = 'context-memory:carryover';
 const HABITS_SECTION = 'context-memory:habits';
 const IDENTITY_ORDER = 100;
+const PERSONA_ORDER = 150;
 const FACTS_ORDER = 300;
 const HABITS_ORDER = 280;
 const FORMAT_VERSION = 1;
 const DAY_MS = 86_400_000;
-const USAGE = '/memory [status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path]]';
+const USAGE = '/memory [status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path]|persona [show|versions|clear]]';
 
 export const Config = z.object({
   directory: z.string().default(''),
@@ -48,6 +48,9 @@ export const Config = z.object({
   habitsMaxChars: z.number().min(200).max(2000).default(600),
   identityFile: z.string().default(''),
   identityMaxChars: z.number().min(200).max(3000).default(1200),
+  personaDirectory: z.string().default(''),
+  personaMaxChars: z.number().min(200).max(4000).default(1200),
+  personaKeepVersions: z.number().min(1).max(20).default(5),
 });
 
 function clampInt(value, fallback, min, max) {
@@ -86,6 +89,11 @@ function readConfig(raw) {
       ? resolve(source.identityFile.trim())
       : '',
     identityMaxChars: clampInt(source.identityMaxChars, 1200, 200, 3000),
+    personaDirectory: typeof source.personaDirectory === 'string' && source.personaDirectory.trim().length > 0
+      ? resolve(source.personaDirectory.trim())
+      : join(home, 'persona'),
+    personaMaxChars: clampInt(source.personaMaxChars, 1200, 200, 4000),
+    personaKeepVersions: clampInt(source.personaKeepVersions, 5, 1, 20),
   };
 }
 
@@ -687,6 +695,38 @@ export function apply(ctx, config) {
     rememberSection(`${agent.id}:identity`, dispose);
   }
 
+  async function readPersonaText() {
+    try {
+      return await readPersona(cfg.personaDirectory);
+    } catch (error) {
+      report(`读取人格记忆失败 ${cfg.personaDirectory}: ${String(error)}`);
+      return '';
+    }
+  }
+
+  function personaSectionText(text) {
+    return [
+      '## 人格记忆（常驻）',
+      `这是你当前的人格与关系摘要，不是项目事实。需要更新时，用 persona_save 写一份不超过 ${cfg.personaMaxChars} 字的替换版本；旧版本保存在 persona/versions。`,
+      '',
+      text,
+    ].join('\n');
+  }
+
+  async function attachPersona(agent) {
+    const systemPrompt = agent.ctx?.systemPrompt;
+    if (!systemPrompt) return;
+    const text = await readPersonaText();
+    if (text.length === 0) return;
+    const dispose = systemPrompt.section({
+      name: PERSONA_SECTION,
+      order: PERSONA_ORDER,
+      text: personaSectionText(text),
+      interpolate: false,
+    });
+    rememberSection(`${agent.id}:persona`, dispose);
+  }
+
   async function attachMemory(agent) {
     const header = agent.session?.header ?? {};
     if (typeof header.cwd !== 'string' || header.cwd.length === 0) return;
@@ -737,6 +777,7 @@ export function apply(ctx, config) {
       const entry = ensureEntry(agent.session, true);
       if (!entry) return;
       await attachIdentity(agent);
+      await attachPersona(agent);
       if (cfg.autoAttach && (source === 'startup' || source === 'clear')) await attachMemory(agent);
     } catch (error) {
       report(`初始化会话记忆失败 ${agent?.id}: ${String(error)}`);
@@ -745,7 +786,7 @@ export function apply(ctx, config) {
 
   ctx.on('agent/disposed', ({ agent }) => {
     try {
-      for (const key of [`${agent.id}:identity`, `${agent.id}:habits`, `${agent.id}:facts`]) {
+      for (const key of [`${agent.id}:identity`, `${agent.id}:persona`, `${agent.id}:habits`, `${agent.id}:facts`]) {
         const dispose = sectionDisposers.get(key);
         if (dispose) {
           try {
@@ -910,6 +951,53 @@ export function apply(ctx, config) {
     },
   });
 
+  ctx.tools.register({
+    name: 'persona_save',
+    description: `用一份不超过 ${cfg.personaMaxChars} 字的摘要替换「人格/关系记忆」。只写长期自我认知与和 li 的关系（称呼、约定、边界、重要变化），不要写项目事实、任务进度或文件路径；旧版本会保留在 persona/versions/。`,
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        text: {
+          type: 'string',
+          description: `完整替换文本，不超过 ${cfg.personaMaxChars} 字；应包含旧版本中仍需保留的要点。`,
+        },
+      },
+      required: ['text'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          saved: { type: 'boolean' },
+          chars: { type: 'integer' },
+          version: { type: 'string' },
+        },
+        required: ['saved', 'chars', 'version'],
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.saved
+          ? `已写入人格记忆（${value.chars} 字，版本 ${value.version}）。`
+          : '未写入人格记忆。',
+      }],
+    },
+    async execute(args, exec) {
+      if (!cfg.enabled) throw new Error('会话记忆已在配置中禁用');
+      const header = exec.agent?.session?.header ?? {};
+      if (header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0) {
+        throw new Error('子代理不写入人格记忆');
+      }
+      const text = typeof args?.text === 'string' ? args.text : '';
+      const result = await writePersona(cfg.personaDirectory, text, {
+        maxChars: cfg.personaMaxChars,
+        keepVersions: cfg.personaKeepVersions,
+      });
+      return { saved: true, chars: result.chars, version: result.version };
+    },
+  });
+
   async function setHabitsEnabled(next) {
     cfg.habitsEnabled = next;
     const settings = ctx.get('settings');
@@ -926,13 +1014,81 @@ export function apply(ctx, config) {
   }
 
   async function memoryCommand(invocation) {
-    const header = invocation.agent?.session?.header ?? {};
-    if (typeof header.cwd !== 'string' || header.cwd.length === 0) {
-      return { kind: 'error', text: '当前会话没有工作目录，无法使用会话记忆。' };
-    }
-    const workspace = await loadWorkspace(header.cwd);
     const sub = String(invocation.rawInput ?? '').trim();
     const [head, ...rest] = sub.split(/\s+/u).filter(Boolean);
+
+    if (head === 'identity') {
+      const action = rest[0] ?? 'show';
+      if (action === 'path') {
+        return { kind: 'success', text: cfg.identityFile || '未设置身份文件（身份层关闭）。' };
+      }
+      if (action === 'show') {
+        const identity = await readIdentity();
+        if (identity) {
+          return {
+            kind: 'success',
+            text: `身份层（order ${IDENTITY_ORDER}）\n文件：${cfg.identityFile}\n\n${identity}`,
+          };
+        }
+        return {
+          kind: 'success',
+          text: cfg.identityFile
+            ? `身份文件已配置，但没有解析到有效内容：${cfg.identityFile}`
+            : '未配置身份文件。可在插件设置页填写 identityFile，或在 profile 配置中设置。',
+        };
+      }
+      return { kind: 'error', text: `未知参数「${action}」。用法：/memory identity [show|path]` };
+    }
+
+    if (head === 'persona') {
+      const action = rest[0] ?? 'status';
+      const current = await readPersonaText();
+      const versions = await listPersonaVersions(cfg.personaDirectory);
+      if (action === 'status') {
+        return {
+          kind: 'success',
+          text: [
+            '人格记忆（全局，独立于工作记忆）',
+            `人格目录：${cfg.personaDirectory}`,
+            `当前摘要：${join(cfg.personaDirectory, 'current.md')}`,
+            `大小：${current.length}/${cfg.personaMaxChars} 字`,
+            `版本数：${versions.length}（保留最近 ${cfg.personaKeepVersions} 个）`,
+            `身份文件：${cfg.identityFile || '未设置'}`,
+            '',
+            current ? `摘要预览：${clip(current.replace(/\n/gu, ' '), 300)}` : '尚未创建；可用 persona_save 写入。',
+            '',
+            '命令：/memory persona [show|versions|clear]',
+          ].join('\n'),
+        };
+      }
+      if (action === 'show') {
+        return {
+          kind: 'success',
+          text: current
+            ? `人格记忆（${current.length}/${cfg.personaMaxChars} 字）\n目录：${cfg.personaDirectory}\n\n${current}`
+            : '尚无当前人格摘要。用 persona_save 写入，或手动创建 persona/current.md。',
+        };
+      }
+      if (action === 'versions') {
+        return {
+          kind: 'success',
+          text: versions.length > 0
+            ? `人格版本（${versions.length}）\n${versions.join('\n')}`
+            : '尚无人格版本。',
+        };
+      }
+      if (action === 'clear') {
+        await clearPersona(cfg.personaDirectory);
+        return { kind: 'success', text: '已清除人格记忆（current + versions）。身份文件未受影响。' };
+      }
+      return { kind: 'error', text: `未知参数「${action}」。用法：/memory persona [show|versions|clear]` };
+    }
+
+    const header = invocation.agent?.session?.header ?? {};
+    if (typeof header.cwd !== 'string' || header.cwd.length === 0) {
+      return { kind: 'error', text: '当前会话没有工作目录，无法使用工作记忆。' };
+    }
+    const workspace = await loadWorkspace(header.cwd);
     const habitPath = join(habitDirectory(), `${workspace.key}.1.txt`);
     const previousHabitPath = join(habitDirectory(), `${workspace.key}.2.txt`);
 
@@ -940,16 +1096,21 @@ export function apply(ctx, config) {
       const all = collectRecords(workspace, invocation.agent.id, true);
       const habitText = cfg.habitsEnabled ? await readHabitFile(header.cwd) : '';
       const identity = await readIdentity();
+      const persona = await readPersonaText();
+      const personaVersions = await listPersonaVersions(cfg.personaDirectory);
       const lines = [
-        '会话记忆（本地）',
-        `存储目录：${cfg.directory}`,
+        '会话记忆与人格（本地）',
+        `身份文件：${cfg.identityFile || '未设置（关闭）'}`,
+        `身份层：${identity ? `已启用（${identity.length} 字，order ${IDENTITY_ORDER}）` : '未启用'}`,
+        `人格目录：${cfg.personaDirectory}`,
+        `人格摘要：${persona ? `${persona.length}/${cfg.personaMaxChars} 字` : '未创建'}`,
+        `人格版本：${personaVersions.length}（保留最近 ${cfg.personaKeepVersions} 个）`,
         `工作目录：${resolve(header.cwd)}`,
+        `工作存储：${cfg.directory}`,
         `记录文件：${workspace.file}`,
         `保留策略：${cfg.maxAgeDays} 天 / 最多 ${cfg.maxSessions} 个会话`,
         `压缩策略：每次接入 ${cfg.maxChars} 字以内，接入最近 ${cfg.attachSessions} 个会话`,
-        `身份文件：${cfg.identityFile || '未设置（关闭）'}`,
-        `身份层：${identity ? `已启用（${identity.length} 字，order ${IDENTITY_ORDER}）` : '未启用'}`,
-        `交互习惯：${cfg.habitsEnabled ? '已开启' : '已关闭'}（最多保留 2 份，先于事实恢复）`,
+        `交互习惯：${cfg.habitsEnabled ? '已开启' : '已关闭'}（最多保留 2 份）`,
         `习惯文件：${habitPath}`,
         `习惯备份：${previousHabitPath}`,
         `记录数：${all.length}`,
@@ -976,8 +1137,10 @@ export function apply(ctx, config) {
       const latest = all[0];
       const habitText = cfg.habitsEnabled ? await readHabitFile(header.cwd) : '';
       const identity = await readIdentity();
+      const persona = await readPersonaText();
       const chunks = [];
       if (identity) chunks.push(identity);
+      if (persona) chunks.push(personaSectionText(persona));
       if (habitText) chunks.push(habitsSectionText(habitText));
       if (latest) {
         const digest = latest.digest ?? buildDigest(latest, cfg);
@@ -997,39 +1160,18 @@ export function apply(ctx, config) {
       const facts = renderFacts(all);
       const habitText = cfg.habitsEnabled ? await readHabitFile(header.cwd) : '';
       const identity = await readIdentity();
+      const persona = await readPersonaText();
       const chunks = [];
       if (identity) chunks.push(identity);
+      if (persona) chunks.push(personaSectionText(persona));
       if (habitText) chunks.push(habitsSectionText(habitText));
       if (facts) chunks.push(factsSectionText(facts));
       return {
         kind: 'success',
         text: chunks.length > 0
-          ? `以下内容将按此顺序注入：身份（order ${IDENTITY_ORDER}）→ 交互习惯（order ${HABITS_ORDER}）→ 会话事实（order ${FACTS_ORDER}）。\n\n${chunks.join('\n\n---\n\n')}`
+          ? `以下内容将按此顺序注入：身份（${IDENTITY_ORDER}）→ 人格（${PERSONA_ORDER}）→ 交互习惯（${HABITS_ORDER}）→ 会话事实（${FACTS_ORDER}）。\n\n${chunks.join('\n\n---\n\n')}`
           : '当前没有可接入的记忆。',
       };
-    }
-
-    if (head === 'identity') {
-      const action = rest[0] ?? 'show';
-      if (action === 'path') {
-        return { kind: 'success', text: cfg.identityFile || '未设置身份文件（身份层关闭）。' };
-      }
-      if (action === 'show') {
-        const identity = await readIdentity();
-        if (identity) {
-          return {
-            kind: 'success',
-            text: `身份层（order ${IDENTITY_ORDER}）\n文件：${cfg.identityFile}\n\n${identity}`,
-          };
-        }
-        return {
-          kind: 'success',
-          text: cfg.identityFile
-            ? `身份文件已配置，但没有解析到有效内容：${cfg.identityFile}`
-            : '未配置身份文件。可在插件设置页填写 identityFile，或在 profile 配置中设置。',
-        };
-      }
-      return { kind: 'error', text: `未知参数「${action}」。用法：/memory identity [show|path]` };
     }
 
     if (head === 'clear') {
@@ -1081,8 +1223,8 @@ export function apply(ctx, config) {
   ctx.inject(['commands'], (commandCtx) => {
     commandCtx.effect(() => commandCtx.commands.register({
       name: 'memory',
-      description: '查看、预览或清除本地跨会话记忆、交互习惯与身份层',
-      input: { hint: '[status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path]]' },
+      description: '查看、预览或清除本地工作记忆、交互习惯、身份层与人格记忆',
+      input: { hint: '[status|show|path|preview|clear|habits [on|off|show|clear]|identity [show|path]|persona [show|versions|clear]]' },
       handler: memoryCommand,
     }));
   });

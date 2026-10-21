@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）使用文档
 
-适用版本：**1.1.0**（Windows / macOS / Linux）
+适用版本：**1.2.0**（Windows / macOS / Linux）
 插件包：`dsh-session-memory`
 源码目录：`<repo>`
 
@@ -50,7 +50,7 @@
    └ 会话记忆            ← 点击卡片进入详情页
       └ 包含的组件
          └ 会话记忆 ›     ← 点击这一行的标题（右侧有 › 箭头）
-            └ 存储与交互习惯页面
+            └ 人格、身份与工作页面
 ```
 
 注意：
@@ -63,8 +63,8 @@
 ```
 左侧栏「插件」
 └ 内置插件配置
-   └ 存储与交互习惯      ← 点击卡片
-      └ 存储与交互习惯页面
+   └ 人格、身份与工作      ← 点击卡片
+      └ 人格、身份与工作页面
 ```
 
 如果入口 A 的页面显示“该 Host 条目未加载，暂时无法配置”，请使用入口 B；这是较新版本提供的兜底入口。
@@ -96,7 +96,10 @@
 
 ```
 <身份文件>                      任意路径的 INI，由 identityFile 指定（只读，不复制）
-<存储根目录>/
+<人格目录>/                     默认 $DSH_HOME/persona
+  current.md                    当前人格/关系摘要（≤ personaMaxChars）
+  versions/                     迭代版本，保留最近 personaKeepVersions 个
+<工作存储>/
   <工作区哈希>.json            事实/对话压缩（每个工作区一个）
   habits/
     <工作区哈希>.1.txt         最新交互习惯总结
@@ -138,6 +141,29 @@
 ```
 /memory identity
 /memory identity path
+```
+
+---
+
+## 5.5 人格记忆（独立于工作记忆）
+
+人格记忆是全局的**自我认知与关系摘要**，与工作数据完全分开：
+
+- 目录：`personaDirectory`，默认 `$DSH_HOME/persona`；
+- 当前：`<人格目录>/current.md`；
+- 版本：`<人格目录>/versions/<ISO>.md`，只保留最近 `personaKeepVersions` 个；
+- 注入：order **150**，位于身份（100）之后、习惯（280）之前；
+- 更新：模型调用 `persona_save(text)`，或手动编辑 `current.md`；
+- 上限：`personaMaxChars`（默认 1200）；超过会被拒绝，要求先压缩；
+- 清除：`/memory persona clear` 只清人格记忆，不影响身份/工作数据。
+
+“迭代”方式是：每次用一份完整的新摘要替换当前版本；旧版本自动保留，便于回滚。工作记忆、习惯、身份都不受影响。
+
+```
+/memory persona
+/memory persona show
+/memory persona versions
+/memory persona clear
 ```
 
 ---
@@ -193,18 +219,19 @@
 新会话（`startup` / `clear`）在相同工作目录创建时，按 order 注入：
 
 1. **身份层**（`identityFile` 已配置时）：order `100`；
-2. 该工作区最新的 `.1.txt`：**交互习惯（先读）**，order `280`；
-3. 最近一次事实摘要：**会话事实（后读）**，order `300`。
+2. **人格记忆**（`personaDirectory/current.md` 存在时）：order `150`；
+3. 该工作区最新的 `.1.txt`：**交互习惯（先读）**，order `280`；
+4. 最近一次事实摘要：**会话事实（后读）**，order `300`。
 
-实现顺序：身份 100 → 习惯 280 → 事实 300，所以身份在最前、事实在最后。
+实现顺序：身份 100 → 人格 150 → 习惯 280 → 事实 300。
 
 以下情况不会接入：
 
-- `resume` 恢复的旧会话：**只恢复身份层**，不重复接入习惯/事实（它本身已有历史）；
+- `resume` 恢复的旧会话：**只恢复身份 + 人格**，不重复接入习惯/事实；
 - 子代理会话：完全跳过；
-- 不同工作目录：不接入习惯/事实（身份层是全局的，仍会恢复）；
+- 不同工作目录：不接入习惯/事实（身份、人格是全局的，仍会恢复）；
 - 习惯开关关闭时：只跳过习惯，事实仍接入；
-- 没有可用记录的新工作区：只恢复身份层。
+- 没有可用记录的新工作区：只恢复身份 + 人格。
 
 想确认下一次会话实际会看到什么，运行：
 
@@ -220,23 +247,28 @@
 
 | 命令 | 作用 |
 |---|---|
-| `/memory`、`/memory status` | 查看存储目录、身份/习惯开关、记录数与文件路径 |
-| `/memory show` | 身份层 → 习惯总结 → 最近一次事实摘要 |
+| `/memory`、`/memory status` | 查看身份 / 人格 / 工作三套路径、大小、记录数 |
+| `/memory show` | 身份 → 人格 → 习惯 → 最近一次事实摘要 |
 | `/memory preview` | 打印下次会话将按什么顺序注入的完整内容 |
-| `/memory path` | 事实记录文件路径 |
-| `/memory clear` | 清除该工作区的事实记忆（不影响身份/习惯） |
+| `/memory path` | 工作记录文件路径 |
+| `/memory clear` | 清除该工作区的事实记忆（不影响身份/人格/习惯） |
 | `/memory habits` | 查看最新习惯 |
 | `/memory habits on\|off` | 开启/关闭习惯归纳 |
 | `/memory habits show` | 查看习惯文件内容 |
 | `/memory habits clear` | 删除该工作区的两份习惯文件 |
 | `/memory identity` | 查看解析后的身份层 |
 | `/memory identity path` | 查看身份文件路径 |
+| `/memory persona` | 人格记忆状态（目录、大小、版本数） |
+| `/memory persona show` | 查看当前人格摘要 |
+| `/memory persona versions` | 列出人格版本 |
+| `/memory persona clear` | 清除人格记忆与版本（不影响身份/工作） |
 
 ### 模型工具
 
 | 工具 | 作用 |
 |---|---|
-| `memory_save(note, tags?)` | 让模型把项目目标、决策、约定、下一步写入记忆 |
+| `persona_save(text)` | 写入/迭代人格记忆（≤ `personaMaxChars`，自动版本化） |
+| `memory_save(note, tags?)` | 让模型把项目目标、决策、约定、下一步写入工作记忆 |
 | `memory_recall(query?, limit?)` | 按关键词检索同一工作区的事实记忆 |
 
 `memory_save` 写入的要点会单独保存在事实记录的 `notes` 中，并在下次会话的“已保存的要点”里优先出现。
@@ -254,6 +286,9 @@
     directory: ''          # 存储根目录；留空使用 $DSH_HOME/context-memory
     identityFile: ''       # 身份 INI 绝对路径；留空关闭身份层
     identityMaxChars: 1200 # 身份层正文上限
+    personaDirectory: ''   # 人格目录；留空 $DSH_HOME/persona
+    personaMaxChars: 1200  # 人格摘要上限
+    personaKeepVersions: 5 # 保留最近几个人格版本
     autoAttach: true       # 新会话自动接入
     maxChars: 3000         # 事实摘要上限
     maxAgeDays: 14         # 记录保留天数
@@ -267,7 +302,7 @@
     habitsMaxChars: 600    # 习惯正文上限
 ```
 
-设置页面会修改 `identityFile`、`directory` 与 `habitsEnabled`，其余字段仍通过配置或命令维护。
+设置页面会修改 `identityFile`、`personaDirectory`、`directory` 与 `habitsEnabled`，其余字段仍通过配置或命令维护。
 
 ---
 
@@ -279,8 +314,8 @@
 
 ### 10.2 页面显示“该 Host 条目未加载，暂时无法配置”
 
-1. 先试 **内置插件配置 → 存储与交互习惯**（入口 B）；
-2. 确认安装的是 **1.1.0** 或更新版本；
+1. 先试 **内置插件配置 → 人格、身份与工作**（入口 B）；
+2. 确认安装的是 **1.2.0** 或更新版本；
 3. 安装/升级后需**完全退出并重开 DSH**，刷新页面不够；
 4. 若两个入口仍不可用，请记录当前版本与页面提示，交给维护者排查。
 
@@ -326,14 +361,30 @@
 
 ---
 
+### 10.9 人格记忆太大 / persona_save 被拒绝
+
+人格记忆是**有上限的迭代摘要**：`personaMaxChars`（默认 1200）。超过时 `persona_save` 会直接报错，不会截断。
+
+处理方式：
+
+1. 让模型把新内容与旧内容合并压缩到上限内，再调用一次；
+2. 或手动编辑 `<人格目录>/current.md` 后重试；
+3. 旧版本仍在 `<人格目录>/versions/`，只保留最近 `personaKeepVersions` 个。
+
+工作事实、习惯不要写进人格记忆——它们有各自独立的存储。
+
+---
+
 ## 11. 已知限制
 
 - 身份层是稳定设定，不覆盖安全、诚实和工具规则；也不会让模型获得文件之外的真实记忆；
+- 人格记忆是**迭代摘要**，不是完整自传；每次替换必须保留仍需的要点，且受 `personaMaxChars` 限制；
+- 人格版本只保留最近 `personaKeepVersions` 个，旧版本会被清理；
 - 习惯归纳是**规则推断**，不调用模型；它反映统计倾向，不是绝对准确的偏好判断；
 - 习惯是参考，不是指令；与当前用户要求冲突时，以当前要求为准；
 - 事实摘要按时间窗口滚动，超出 `maxChars` 的早期内容会被省略（保留“早期目标”和最近的对话）；
 - 浏览器端设置页面在安装/升级后需要重启 DSH 才会更新；
-- 更换存储根目录不迁移旧数据。
+- 更换身份/人格/工作目录都不会迁移旧数据。
 
 ---
 
@@ -341,6 +392,8 @@
 
 - 插件说明与配置示例：`<repo>\README.md`
 - 身份层示例：`<repo>\examples\identity.example.ini`
+- 人格记忆示例：`<repo>\examples\persona.example.md`
 - 架构说明：`<repo>\ARCHITECTURE.md`
-- 存储根目录：`<DSH_HOME>\context-memory`（默认）
+- 人格目录：`<DSH_HOME>\persona`（默认）
+- 工作存储：`<DSH_HOME>\context-memory`（默认）
 - 安装目录：`<profile>\node_modules\dsh-session-memory`
