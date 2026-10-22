@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）使用文档
 
-适用版本：**1.7.1**（Windows / macOS / Linux）
+适用版本：**1.8.1**（Windows / macOS / Linux）
 插件包：`dsh-session-memory`
 源码目录：`<repo>`
 
@@ -294,7 +294,7 @@
 | `kind: 'todo'` | 未完成事项/阻塞，单独成段 |
 | `why` | 一句“为什么”，跟条目一起保存、注入、检索 |
 | `status: 'open' \| 'blocked'` | 待办/阻塞 |
-| `pinned: true` | 永久钉住，压缩时跳过，不受普通时间/数量上限淘汰 |
+| `pinned: true` | 永久钉住，压缩时优先保留（仍受摘要总预算约束），不受普通时间/数量上限淘汰 |
 | `supersedes: [id]` | 新条目取代旧条目；旧条目不再进入摘要/召回 |
 | `ttlDays` | 过期天数（0 = 不过期）；过期后不再进入摘要/召回（pinned 可覆盖） |
 
@@ -308,10 +308,10 @@
 
 召回（`memory_recall`）现在：
 
-- 只查 `notes` / `openItems` 结构化条目，**不查** 对话、工具调用、摘要正文；
+- 只查工作区级 `memory.notes` / `memory.openItems`，**不查** 对话、工具调用、摘要正文；
 - 默认 `kind=note`；`kind='todo'` 查待办；`kind='all'` 两者都查；
-- 关键词按命中/精确短语/标签加权，再做时间衰减，不再纯时间倒序；
-- 多词查询要求至少命中 2 个词（或 60%），避免只含「插件」的弱相关条目混进来；
+- BM25 × IDF × 覆盖率 × 30 天半衰期 × 重要度排序，并做同义扩展（终端/shell、权限/acl、删除/remove 等 15 组）；
+- 不再有“必须命中 2 个词”的硬门槛，改为低于最高分 35% 的相对截断；
 - 默认不返回已被取代的旧条目；`includeSuperseded:true` 时返回并标注 `supersededBy`；
 - 新条目会标注 `supersedes`，摘要直接跳过旧条目；
 - 空查询按钉住优先、最近时间排序。
@@ -325,6 +325,16 @@
 ```
 
 摘要仍然是有损索引；`factsSectionText` 会明确提示：关键事实、决定理由、文件内容以本地文件和会话日志为准。
+
+---
+
+## 7.6 1.8 工作区记忆库与 BM25
+
+- 要点/待办存在工作区级 `memory: {notes, openItems}`，不再随某一次会话的 `maxAgeDays` / `maxSessions` 被剪掉；`sessionId` 只作来源标记。
+- 旧文件没有 `memory` 字段时，首次读取会从 `sessions[*].notes/openItems` 迁移一次，旧数据保留，回滚不丢。
+- 召回用 [`recall.js`](recall.js)：保存时抽 `kw` 关键词（CJK bigram + 英文词），查询时 BM25 + IDF + 覆盖率 + 30 天衰减 + 钉住/阻塞/why 重要度；同义词表在 `ALIAS_GROUPS`，阈值在 `RANKING`。
+- 写入自动去重：正文归一化相同，或全文 token Jaccard ≥ 0.75，则更新原条目并返回 `merged: true`。
+- `maxNotes` 现在是**每个工作区**的普通要点上限；`maxOpenItems` 同理。
 
 ---
 

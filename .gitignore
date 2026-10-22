@@ -1,5 +1,7 @@
 node_modules/
 _tgz/
+_backup-*/
+_data-backup-*
 context-memory/
 *.log
 .DS_Store

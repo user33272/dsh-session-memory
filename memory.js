@@ -3,6 +3,7 @@
  * Cordis Host half so they can be unit-tested without the DSH runtime.
  */
 import { createHash } from 'node:crypto';
+import { mergeLegacyEntries } from './recall.js';
 
 const DAY_MS = 86_400_000;
 
@@ -30,6 +31,8 @@ export function normalizeNote(note, fallbackTime = Date.now()) {
     text,
     why: clip(note?.why ?? '', 200),
     tags: Array.isArray(note?.tags) ? note.tags.slice(0, 5).map((tag) => clip(tag, 24)) : [],
+    kw: Array.isArray(note?.kw) ? note.kw.slice(0, 24).map((token) => clip(String(token), 40)) : [],
+    sessionId: typeof note?.sessionId === 'string' && note.sessionId.length > 0 ? note.sessionId : undefined,
     time,
     pinned: note?.pinned === true,
     deleted: note?.deleted === true,
@@ -48,6 +51,8 @@ export function normalizeOpenItem(item, fallbackTime = Date.now()) {
     id: typeof item?.id === 'string' && item.id.length > 0 ? item.id : memoryId('t', text, time),
     text,
     why: clip(item?.why ?? '', 200),
+    kw: Array.isArray(item?.kw) ? item.kw.slice(0, 24).map((token) => clip(String(token), 40)) : [],
+    sessionId: typeof item?.sessionId === 'string' && item.sessionId.length > 0 ? item.sessionId : undefined,
     status: item?.status === 'blocked' ? 'blocked' : (item?.status === 'done' ? 'done' : 'open'),
     time,
     pinned: item?.pinned === true,
@@ -77,6 +82,26 @@ export function mergeWorkspaceData(disk, local) {
   if (!disk) return local;
   const merged = { ...disk, ...local };
   const sessions = { ...(disk.sessions ?? {}) };
+  // The workspace-level memory store is a union too: disk entries first, then
+  // any local entry with a newer timestamp for the same id.
+  const memory = { ...(disk.memory ?? {}), ...(local.memory ?? {}) };
+  const notes = new Map();
+  for (const note of [...(disk.memory?.notes ?? []), ...(local.memory?.notes ?? [])]) {
+    if (!note || typeof note.id !== 'string') continue;
+    const previous = notes.get(note.id);
+    if (!previous || (note.time ?? 0) >= (previous.time ?? 0)) notes.set(note.id, note);
+  }
+  const openItems = new Map();
+  for (const item of [...(disk.memory?.openItems ?? []), ...(local.memory?.openItems ?? [])]) {
+    if (!item || typeof item.id !== 'string') continue;
+    const previous = openItems.get(item.id);
+    if (!previous || (item.time ?? 0) >= (previous.time ?? 0)) openItems.set(item.id, item);
+  }
+  memory.notes = [...notes.values()];
+  memory.openItems = [...openItems.values()];
+  if (memory.notes.length > 0 || memory.openItems.length > 0 || local.memory || disk.memory) {
+    merged.memory = memory;
+  }
   for (const [id, record] of Object.entries(local.sessions ?? {})) {
     const previous = sessions[id];
     if (!previous || (record?.updatedAt ?? 0) >= (previous?.updatedAt ?? 0)) {
@@ -300,4 +325,62 @@ export function buildDigest(record, cfg) {
   let result = parts.filter(Boolean).join('\n\n');
   if (result.length > max) result = trimTo(result, max);
   return result;
+}
+
+/**
+ * Ensure `data.memory` exists, promoting legacy per-session notes exactly once.
+ *
+ * The store is workspace-level on purpose: when notes hung off a session record
+ * they were pruned together with it after `maxAgeDays`/`maxSessions`, which made
+ * “长期要点” anything but long-lived. Legacy notes stay in their session records
+ * so a rollback to an older plugin version is lossless.
+ *
+ * @param {{sessions?: Record<string, object>, memory?: object}} data
+ * @returns {{version: number, notes: object[], openItems: object[], updatedAt: number, migrated: number}}
+ */
+export function ensureMemoryStore(data) {
+  const store = data?.memory;
+  if (store && typeof store === 'object' && Array.isArray(store.notes)) {
+    if (!Array.isArray(store.openItems)) store.openItems = [];
+    if (typeof store.migrated !== 'number') store.migrated = 0;
+    return store;
+  }
+  const merged = mergeLegacyEntries(data?.sessions ?? {});
+  data.memory = {
+    version: 1,
+    notes: merged.notes,
+    openItems: merged.openItems,
+    updatedAt: Date.now(),
+    migrated: merged.migrated,
+  };
+  return data.memory;
+}
+
+/**
+ * Copy the workspace store into a live entry, keeping the newer value per id so
+ * a just-edited in-memory entry is not rolled back by a stale store.
+ *
+ * @param {{notes?: object[], openItems?: object[]}} entry
+ * @param {{notes?: object[], openItems?: object[]}} store
+ * @returns {{notes: object[], openItems: object[]}}
+ */
+export function hydrateEntryFromStore(entry, store) {
+  const mergeList = (fromStore, fromEntry, normalize) => {
+    const byId = new Map();
+    for (const raw of fromStore ?? []) {
+      const item = normalize(raw);
+      if (item.id) byId.set(item.id, item);
+    }
+    for (const raw of fromEntry ?? []) {
+      const item = normalize(raw);
+      const previous = byId.get(item.id);
+      if (!previous || (item.time ?? 0) >= (previous.time ?? 0)) byId.set(item.id, item);
+    }
+    return [...byId.values()].sort((a, b) => (a.time ?? 0) - (b.time ?? 0));
+  };
+  const notes = mergeList(store?.notes, entry?.notes, (note) => normalizeNote(note));
+  const openItems = mergeList(store?.openItems, entry?.openItems, (item) => normalizeOpenItem(item));
+  entry.notes = notes;
+  entry.openItems = openItems;
+  return { notes, openItems };
 }

@@ -33,7 +33,7 @@
       current.md                   # 该工作区人格/关系摘要（≤ personaMaxChars）
       versions/                    # 该工作区迭代版本，保留最近 personaKeepVersions 个
 <工作存储>/                        # 默认 $DSH_HOME/context-memory
-  <工作区哈希>.json                # 事实/对话压缩（每个工作区一个）
+  <工作区哈希>.json                # 事实/对话压缩 + 工作区记忆库 memory{notes,openItems}（每个工作区一个）
   habits/
     <工作区哈希>.1.txt             # 最新交互习惯总结
     <工作区哈希>.2.txt             # 上一次交互习惯总结
@@ -93,9 +93,19 @@
 - `memory_forget(id)`：永久删除一条测试/废弃记忆；
 - `supersedes: [id]`：新条目取代旧条目，旧条目不再进入摘要/召回；
 - `ttlDays`：条目过期时间（0 = 不过期）；过期后不再进入摘要/召回（`pinned` 可覆盖）；
-- 每个条目有稳定 id（`memory_save` 返回，`/memory show` / `/memory todo` 可查）。
+- 每个条目有稳定 id（`memory_save` 返回，`/memory show` / `/memory todo` 可查）；
+- **要点与待办现在存在工作区级记忆库**（`<工作区哈希>.json` 的 `memory` 字段），不再挂在某一次会话记录下：普通要点不再随会话 14 天/20 个的上限被一起剪掉；条目的 `sessionId` 只作来源标记；
+- **写入自动去重**：同一件事换个说法再存（正文归一化相同，或关键词重合度 ≥ 0.75），会更新原有条目并返回 `merged: true`，不会堆出第二条。
 
-召回（`memory_recall`）只查**结构化条目**（notes / openItems），不查对话、工具调用或摘要正文；默认 `kind=note`，`kind='todo'` 查待办，`kind='all'` 两者都查。关键词命中做加权，再按时间衰减排序；多词查询要求至少命中 2 个词（或 60%），避免只含「插件」的弱相关条目混进来；空查询按钉住/最近排序。默认不返回已被取代的旧条目；`includeSuperseded:true` 时返回并标注 `supersededBy`，新条目会标注 `supersedes`。
+召回（`memory_recall`）只查**结构化条目**（notes / openItems），不查对话、工具调用或摘要正文；默认 `kind=note`，`kind='todo'` 查待办，`kind='all'` 两者都查。
+
+排序参照 [meow-memory](https://github.com/Phant0Meow/dsh-meow-memory) 的公开设计，按 **BM25 × IDF × 覆盖率 × 遗忘曲线 × 重要度** 打分：
+
+- 每条记忆在保存时抽出关键词（中文 bigram + 英文/数字词，最长 24 个），写入 `kw` 字段，便于手改与复核；
+- 查询词做同义扩展（终端/shell/命令行/pwsh、权限/acl、删除/remove…），别名权重 0.55，低于字面命中；
+- 覆盖率只影响系数（0.6–1.0），不再是「必须命中 2 个词」的硬门槛——只命中一个稀有词也能排上来，但会被相对截断（低于最高分 35% 的丢弃）；
+- 时间衰减按半衰期 30 天、下限 0.4；钉住 ×1.35、阻塞 ×1.15、带 why ×1.05；
+- 空查询按钉住/最近排序；`includeSuperseded:true` 可看被取代的旧条目；跨工作区（`scope:'all'`）用同一套排序，只读各工作区的 `memory` 字段，不碰身份/人格。
 
 摘要结构：
 
@@ -204,8 +214,8 @@
     maxAgeDays: 14
     maxItems: 80
     maxMessageChars: 600
-    maxNotes: 12
-    maxOpenItems: 20            # 未完成事项上限
+    maxNotes: 12                # 每个工作区普通要点上限（钉住不计入）
+    maxOpenItems: 20            # 每个工作区未完成事项上限
     maxSessions: 20
     attachSessions: 1
     includeToolCalls: true
@@ -221,6 +231,15 @@
 - 损坏/版本不符的 JSON 会先重命名为 `.corrupt-<时间戳>`，备份失败则拒绝覆盖，不再当空文件写回。
 - 摘要 `maxChars` 是**硬上限**：钉住、待办、普通要点、目标、对话、工具全部计入；钉住段有 45% 总预算，超了按 why → tags → 正文截断。
 - `/memory clear` 在落盘成功后同时重置当前 live 条目的 items/goals/style，避免下一回合把旧对话写回。
+
+## 存取逻辑（1.8）
+
+- 记忆条目存在**工作区级** `memory: {notes, openItems}`；会话记录只保留对话/目标/摘要，并镜像本会话自己创建的条目，旧版本回滚时仍能读到。
+- 读到旧格式（只有 `sessions[*].notes`）时自动迁移进 `memory`，记录 `migrated` 计数；旧数据保留不删，回滚无损。
+- `memory_save` 先去重合并（归一化正文相同，或关键词重合度 ≥ 0.75），返回 `merged: true`；`kw` 关键词写在条目上，可直接手改。
+- 召回改用 `recall.js`：BM25（k1=1.2, b=0.75）+ IDF + 覆盖率系数 + 30 天半衰期衰减 + 重要度；同义表见 `ALIAS_GROUPS`，可自行增补。
+- 相对截断：低于最高分 35% 的命中丢弃；空查询按钉住/最近排序。
+- 不再依赖会话记录存活，所以 `/memory todo`、`/memory pins`、`memory_pin/resolve/forget` 现在覆盖整个工作区，重启后也能操作旧条目。
 
 ## 说明与限制
 

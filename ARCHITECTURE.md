@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）插件架构
 
-适用版本：**1.7.1**
+适用版本：**1.8.1**
 源码目录：`<repo>`
 配套文档：[USAGE.md](USAGE.md)（怎么用）、[README.md](README.md)（配置速查）
 
@@ -238,10 +238,11 @@ loadWorkspace(cwd)
   └─ 解析失败/版本不符 → 先备份为 `.corrupt-<时间戳>`；备份失败则阻止覆盖
 
 saveEntry(entry)
-  ├─ 合并已持久化的 notes（重载不丢）
-  ├─ workspace.sessions[entry.id] = toRecord(...)
+  ├─ hydrateEntry(entry, workspace)：把工作区 memory 合并进 live entry（防止 turn/end 清空库）
+  ├─ 更新 workspace.memory.notes / openItems（保留墓碑）
+  ├─ workspace.sessions[entry.id] = toRecord(entry, cfg, memory)
   ├─ prune()：按 maxAgeDays / maxSessions 清理
-  ├─ queueWrite()：获取跨进程 `.lock`，读-合并-写；临时文件 + rename
+  ├─ queueWrite()：获取跨进程 `.lock`，读-合并-写（memory 按 id 并集）；临时文件 + rename
   └─ writeHabitFile()
 
 collectRecords(ws, selfId, includeSelf)
@@ -347,6 +348,17 @@ props.form
   "version": 1,
   "cwd": "D:\\path\\to\\workspace",
   "updatedAt": 1792487171876,
+  "memory": {
+    "version": 1,
+    "updatedAt": 0,
+    "migrated": 0,
+    "notes": [
+      { "id": "n-...", "text": "...", "why": "...", "tags": ["..."], "kw": ["关键词", "bm25"], "sessionId": "session-xxx", "time": 0, "pinned": false }
+    ],
+    "openItems": [
+      { "id": "t-...", "text": "...", "status": "open|blocked|done", "kw": ["..."], "sessionId": "session-xxx", "time": 0 }
+    ]
+  },
   "sessions": {
     "session-xxx": {
       "id": "session-xxx",
@@ -357,13 +369,15 @@ props.form
       "turns": 4,
       "items": [{ "role": "user|assistant|tool", "text": "...", "time": 0 }],
       "goals": ["..."],
-      "notes": [{ "text": "...", "tags": ["..."], "time": 0 }],
+      "notes": [{ "text": "本会话自己创建的条目镜像（兼容旧版本回滚）", "tags": ["..."], "time": 0 }],
       "stats": { "rawChars": 0, "digestChars": 0, "messages": 0 },
       "digest": "### 已保存的要点 ..."
     }
   }
 }
 ```
+
+`memory` 是工作区级记忆库（1.8 起）：条目不再随会话记录一起被 `maxAgeDays` / `maxSessions` 剪掉，`sessionId` 只作来源标记；`kw` 是保存时抽出的检索关键词。旧文件没有 `memory` 字段时，`ensureMemoryStore()` 会从 `sessions[*].notes/openItems` 迁移一次并留下 `migrated` 计数，旧数据不删。
 
 ### 习惯文件
 
@@ -395,6 +409,11 @@ props.form
 | 写入用临时文件 + rename + 跨进程锁 | 避免半截 JSON 和多进程整文件覆盖 |
 | 损坏文件先 `.corrupt` 备份 | 避免把解析失败当空数据写回，原文件丢失 |
 | notes 跨重载合并 | notes 不在会话日志里，重载会丢；合并修复 |
+| 记忆条目存**工作区级**而非会话级 | 会话记录会被 `maxAgeDays`/`maxSessions` 剪掉，挂在里面的“长期要点”实际上只有 14 天 |
+| 召回用 **BM25 × IDF × 覆盖率 × 衰减** 而非子串 | 子串匹配换个说法就找不回；BM25 让稀有词命中的条目排前，衰减让新条目优先 |
+| 关键词**写入时落盘**（`kw`） | 索引稳定、可直接人工修正、不依赖模型或分词服务 |
+| 同义表 + 覆盖率系数，替代“必须命中 2 词” | 保留精度，同时不把只命中一个关键实词的查询整条丢掉 |
+| 写入前去重合并 | 同一件事反复存会挤占 `maxNotes` 并稀释注意力；合并后返回 `merged:true` |
 | 默认 `directory` 留空 | 用 `$DSH_HOME` 的相对默认，便于迁移 |
 
 ---

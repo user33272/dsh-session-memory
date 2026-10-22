@@ -23,6 +23,8 @@ import {
   capNotes,
   capOpenItems,
   clip,
+  ensureMemoryStore,
+  hydrateEntryFromStore,
   isMemoryActive,
   memoryId,
   mergeWorkspaceData,
@@ -31,6 +33,16 @@ import {
   recordHasActive,
   trimTo,
 } from './memory.js';
+import {
+  capMemory,
+  deriveKeywords,
+  itemTokens,
+  keywordSimilarity,
+  mergeLegacyEntries,
+  normalizedText,
+  recent,
+  search,
+} from './recall.js';
 
 export const name = 'session-memory';
 export const inject = ['systemPrompt', 'tools', 'sessions', 'agents'];
@@ -181,9 +193,21 @@ function toolDetail(name, rawArguments) {
   return clip(`${name}${detail ? ` ${detail}` : ''}`, 180);
 }
 
-function toRecord(entry, cfg) {
-  const notes = capNotes(Array.isArray(entry.notes) ? entry.notes : [], cfg.maxNotes);
-  const openItems = capOpenItems(Array.isArray(entry.openItems) ? entry.openItems : [], cfg.maxOpenItems);
+/**
+ * Build the persisted record for one session.
+ *
+ * Notes/open items live at workspace level now (`memory`), so the digest is
+ * built from the workspace store while the per-session mirror only keeps the
+ * entries this session created — that keeps older plugin versions (which read
+ * `record.notes`) able to render something after a rollback.
+ */
+function toRecord(entry, cfg, memory) {
+  const allNotes = (Array.isArray(memory?.notes) ? memory.notes : entry.notes ?? [])
+    .map((note) => normalizeNote(note));
+  const allOpenItems = (Array.isArray(memory?.openItems) ? memory.openItems : entry.openItems ?? [])
+    .map((item) => normalizeOpenItem(item));
+  const notes = allNotes;
+  const openItems = allOpenItems;
   const digest = buildDigest({ ...entry, notes, openItems }, cfg);
   return {
     id: entry.id,
@@ -194,8 +218,8 @@ function toRecord(entry, cfg) {
     turns: entry.turns,
     items: entry.items.slice(-cfg.maxItems),
     goals: entry.goals.slice(-20),
-    notes,
-    openItems,
+    notes: allNotes.filter((note) => note.sessionId === entry.id && note.deleted !== true),
+    openItems: allOpenItems.filter((item) => item.sessionId === entry.id && item.deleted !== true),
     stats: {
       rawChars: entry.rawChars,
       digestChars: digest.length,
@@ -485,6 +509,12 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       try {
         const parsed = await readWorkspaceFile(workspace.file);
         if (parsed) workspace.data = parsed;
+        // Promote legacy per-session notes/open items into the workspace-level
+        // store exactly once. The originals are kept so a rollback stays lossless.
+        const store = memoryStore(workspace);
+        if (store.migrated > 0) {
+          report(`已把 ${store.migrated} 条会话级记忆迁移到工作区记忆库 ${workspace.file}`);
+        }
       } catch (error) {
         workspace.writeBlocked = true;
         report(`读取记忆失败，已阻止覆盖 ${workspace.file}: ${String(error)}`);
@@ -553,37 +583,19 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
     await writeFile(latest, text, 'utf8');
   }
 
-  function mergeStoredNotes(entry, stored) {
-    const storedNotes = Array.isArray(stored?.notes)
-      ? stored.notes.map((note) => normalizeNote(note)).filter((note) => !note.deleted)
-      : [];
-    const known = new Set(entry.notes.map((note) => note.id));
-    for (const note of storedNotes) {
-      const existing = entry.notes.find((item) => item.id === note.id);
-      if (existing) {
-        // The in-memory entry is authoritative (it may have just been
-        // unpinned); never re-apply a stale pinned flag from disk.
-        continue;
-      }
-      if (!known.has(note.id)) {
-        entry.notes.push(note);
-        known.add(note.id);
-      }
-    }
-    entry.notes = capNotes(entry.notes, cfg.maxNotes);
+  /**
+   * The workspace-level memory store. Notes/open items used to hang off one
+   * session record, which meant an ordinary note died with that session after
+   * `maxAgeDays`/`maxSessions`. They now live once per workspace, with
+   * `sessionId` kept as provenance. See `ensureMemoryStore` in memory.js.
+   */
+  function memoryStore(workspace) {
+    return ensureMemoryStore(workspace.data);
+  }
 
-    const storedOpen = Array.isArray(stored?.openItems)
-      ? stored.openItems.map((item) => normalizeOpenItem(item)).filter((item) => !item.deleted)
-      : [];
-    if (!Array.isArray(entry.openItems)) entry.openItems = [];
-    const knownOpen = new Set(entry.openItems.map((item) => item.id));
-    for (const item of storedOpen) {
-      if (!knownOpen.has(item.id)) {
-        entry.openItems.push(item);
-        knownOpen.add(item.id);
-      }
-    }
-    entry.openItems = capOpenItems(entry.openItems, cfg.maxOpenItems);
+  /** Load the workspace store into a live entry so tools can keep using it. */
+  function hydrateEntry(entry, workspace) {
+    return hydrateEntryFromStore(entry, memoryStore(workspace));
   }
 
   function findMemoryItem(entry, id) {
@@ -596,8 +608,20 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
 
   async function saveEntry(entry) {
     const workspace = await loadWorkspace(entry.cwd);
-    mergeStoredNotes(entry, workspace.data.sessions[entry.id]);
-    workspace.data.sessions[entry.id] = toRecord(entry, cfg);
+    // A turn/end save must not overwrite the workspace-level store with an
+    // entry that only knows the current session's notes. Hydrate first so
+    // pre-existing workspace notes/open items survive every ordinary turn.
+    hydrateEntry(entry, workspace);
+    const store = memoryStore(workspace);
+    store.notes = capMemory((entry.notes ?? []).map((note) => normalizeNote(note)), cfg.maxNotes);
+    store.openItems = capMemory(
+      (entry.openItems ?? []).map((item) => normalizeOpenItem(item)),
+      cfg.maxOpenItems,
+    );
+    store.updatedAt = Date.now();
+    entry.notes = store.notes;
+    entry.openItems = store.openItems;
+    workspace.data.sessions[entry.id] = toRecord(entry, cfg, store);
     workspace.data.updatedAt = Date.now();
     await queueWrite(workspace);
     if (cfg.habitsEnabled) {
@@ -719,8 +743,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       if (entry.cwdKey !== workspace.key) continue;
       if (entry.items.length === 0 && entry.notes.length === 0 && (entry.openItems?.length ?? 0) === 0) continue;
       const view = { ...entry, notes: [...entry.notes], openItems: [...(entry.openItems ?? [])] };
-      mergeStoredNotes(view, workspace.data.sessions[id]);
-      records.set(id, toRecord(view, cfg));
+      records.set(id, toRecord(view, cfg, memoryStore(workspace)));
     }
     return [...records.values()].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
   }
@@ -777,12 +800,19 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
             && typeof record.updatedAt === 'number'
             && (record.updatedAt >= cutoff || recordHasActive(record)))
           .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
-        if (records.length === 0) continue;
+        const memory = data.memory && Array.isArray(data.memory.notes)
+          ? { notes: data.memory.notes, openItems: Array.isArray(data.memory.openItems) ? data.memory.openItems : [] }
+          : (() => {
+            const merged = mergeLegacyEntries(data.sessions);
+            return { notes: merged.notes, openItems: merged.openItems };
+          })();
+        if (records.length === 0 && memory.notes.length === 0 && memory.openItems.length === 0) continue;
         workspaces.push({
           key,
           cwd: typeof data.cwd === 'string' ? data.cwd : '(unknown)',
-          updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : (records[0].updatedAt ?? 0),
+          updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : (records[0]?.updatedAt ?? 0),
           records,
+          memory,
         });
       } catch (error) {
         report(`读取其他工作区失败 ${file}: ${String(error)}`);
@@ -1097,6 +1127,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
         additionalProperties: false,
         properties: {
           saved: { type: 'boolean' },
+          merged: { type: 'boolean' },
           id: { type: 'string' },
           kind: { type: 'string' },
           notes: { type: 'integer' },
@@ -1105,12 +1136,12 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
           superseded: { type: 'integer' },
           expiresAt: { type: 'integer' },
         },
-        required: ['saved', 'id', 'kind', 'notes', 'openItems', 'pinned', 'superseded', 'expiresAt'],
+        required: ['saved', 'merged', 'id', 'kind', 'notes', 'openItems', 'pinned', 'superseded', 'expiresAt'],
       },
       render: (_args, value) => [{
         type: 'text',
         text: value.saved
-          ? `已保存${value.kind === 'todo' ? '未完成事项' : '要点'}（id: ${value.id}${value.pinned ? '，已钉住' : ''}${value.superseded > 0 ? `，取代 ${value.superseded} 条旧记忆` : ''}${value.expiresAt > 0 ? `，${new Date(value.expiresAt).toLocaleDateString('zh-CN')} 过期` : ''}）。当前要点 ${value.notes} 条，未完成 ${value.openItems} 条。`
+          ? `${value.merged ? '已更新同一条' : '已保存'}${value.kind === 'todo' ? '未完成事项' : '要点'}（id: ${value.id}${value.pinned ? '，已钉住' : ''}${value.superseded > 0 ? `，取代 ${value.superseded} 条旧记忆` : ''}${value.expiresAt > 0 ? `，${new Date(value.expiresAt).toLocaleDateString('zh-CN')} 过期` : ''}）。当前要点 ${value.notes} 条，未完成 ${value.openItems} 条。`
           : '未保存。',
       }],
     },
@@ -1123,7 +1154,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       const header = agent.session?.header ?? {};
       if (typeof header.cwd === 'string' && header.cwd.length > 0) {
         const workspace = await loadWorkspace(header.cwd);
-        mergeStoredNotes(entry, workspace.data.sessions[agent.id]);
+        hydrateEntry(entry, workspace);
       }
       const text = typeof args?.note === 'string' ? args.note.trim() : '';
       if (text.length === 0) throw new Error('note 不能为空');
@@ -1160,28 +1191,64 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
           }
         }
       }
-      if (kind === 'todo') {
-        if (!Array.isArray(entry.openItems)) entry.openItems = [];
-        entry.openItems.push({
+      // Keyword list is written at save time (see recall.js) so retrieval does
+      // not have to guess from raw text later, and so the model can correct it
+      // by hand in the JSON file.
+      const keywords = deriveKeywords({ text: clip(text, 400), why, tags });
+      const list = kind === 'todo' ? (entry.openItems ?? []) : entry.notes;
+      // Near-duplicate detection: re-saving the same fact in slightly different
+      // wording refreshes the existing entry instead of piling up a second copy.
+      const active = list.filter((item) => isMemoryActive(item, time));
+      const candidate = supersedeIds.size > 0
+        ? undefined
+        : active.find((item) => normalizedText(item.text) === normalizedText(text)
+          || keywordSimilarity(itemTokens(item), itemTokens({ text, why, tags })) >= 0.75);
+      let merged = false;
+      let savedId = id;
+      if (candidate) {
+        candidate.text = clip(text, 400);
+        if (why.length > 0) candidate.why = why;
+        if (tags.length > 0) candidate.tags = tags;
+        candidate.kw = keywords;
+        candidate.time = time;
+        candidate.pinned = pinned || candidate.pinned === true;
+        if (typeof expiresAt === 'number') candidate.expiresAt = expiresAt;
+        if (kind === 'todo' && args?.status === 'blocked') candidate.status = 'blocked';
+        savedId = candidate.id;
+        merged = true;
+      } else if (kind === 'todo') {
+        entry.openItems = capOpenItems([...list, {
           id,
           text: clip(text, 400),
           why,
+          kw: keywords,
+          sessionId: entry.id,
           status: args?.status === 'blocked' ? 'blocked' : 'open',
           time,
           pinned,
           expiresAt,
           supersedes: [...supersedeIds],
-        });
-        entry.openItems = capOpenItems(entry.openItems, cfg.maxOpenItems);
+        }], cfg.maxOpenItems);
       } else {
-        entry.notes.push({ id, text: clip(text, 400), why, tags, time, pinned, expiresAt, supersedes: [...supersedeIds] });
-        entry.notes = capNotes(entry.notes, cfg.maxNotes);
+        entry.notes = capNotes([...list, {
+          id,
+          text: clip(text, 400),
+          why,
+          tags,
+          kw: keywords,
+          sessionId: entry.id,
+          time,
+          pinned,
+          expiresAt,
+          supersedes: [...supersedeIds],
+        }], cfg.maxNotes);
       }
       entry.updatedAt = time;
       await saveEntry(entry);
       return {
         saved: true,
-        id,
+        merged,
+        id: savedId,
         kind,
         notes: entry.notes.length,
         openItems: (entry.openItems ?? []).filter((item) => item.status === 'open' || item.status === 'blocked').length,
@@ -1233,7 +1300,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       const header = agent.session?.header ?? {};
       if (typeof header.cwd === 'string' && header.cwd.length > 0) {
         const workspace = await loadWorkspace(header.cwd);
-        mergeStoredNotes(entry, workspace.data.sessions[agent.id]);
+        hydrateEntry(entry, workspace);
       }
       const found = findMemoryItem(entry, id);
       if (!found) throw new Error(`未找到条目 ${id}`);
@@ -1282,7 +1349,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       const header = agent.session?.header ?? {};
       if (typeof header.cwd === 'string' && header.cwd.length > 0) {
         const workspace = await loadWorkspace(header.cwd);
-        mergeStoredNotes(entry, workspace.data.sessions[agent.id]);
+        hydrateEntry(entry, workspace);
       }
       const found = findMemoryItem(entry, id);
       if (!found) throw new Error(`未找到未完成事项 ${id}`);
@@ -1333,16 +1400,19 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       const header = agent.session?.header ?? {};
       if (typeof header.cwd === 'string' && header.cwd.length > 0) {
         const workspace = await loadWorkspace(header.cwd);
-        mergeStoredNotes(entry, workspace.data.sessions[agent.id]);
+        hydrateEntry(entry, workspace);
       }
       const found = findMemoryItem(entry, id);
       if (!found) return { forgotten: false, id, kind: '' };
+      const deletedAt = Date.now();
       if (found.kind === 'note') {
         found.note.deleted = true;
-        found.note.deletedAt = Date.now();
+        found.note.deletedAt = deletedAt;
+        found.note.time = deletedAt;
       } else {
         found.item.deleted = true;
-        found.item.deletedAt = Date.now();
+        found.item.deletedAt = deletedAt;
+        found.item.time = deletedAt;
       }
       entry.updatedAt = Date.now();
       await saveEntry(entry);
@@ -1442,76 +1512,71 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       const includeSuperseded = args?.includeSuperseded === true;
       const limit = clampInt(args?.limit, 5, 1, 5);
       const rawQuery = typeof args?.query === 'string' ? args.query.trim() : '';
-      const query = rawQuery.toLowerCase();
-      const terms = [...new Set(query.split(/[\s,，。;；/|]+/u).filter((term) => term.length > 0))];
-      const records = collectRecords(workspace, agent.id, true)
-        .map((record) => ({ workspace: header.cwd, record }));
+      const now = Date.now();
+
+      /** Collect (kind, item, workspace) triples from one workspace store. */
+      const pool = [];
+      const collect = (store, cwd) => {
+        for (const note of store?.notes ?? []) pool.push({ kind: 'note', item: normalizeNote(note), workspace: cwd });
+        for (const item of store?.openItems ?? []) pool.push({ kind: 'todo', item: normalizeOpenItem(item), workspace: cwd });
+      };
+      collect(memoryStore(workspace), header.cwd);
+
       if (scope === 'all') {
         if (!cfg.crossWorkspaceEnabled) {
           throw new Error('跨工作区读取未启用；请在插件设置中开启，或使用默认的 workspace 范围');
         }
-        const others = await loadOtherWorkspaces(workspace.key);
-        for (const other of others) {
-          for (const record of other.records) records.push({ workspace: other.cwd, record });
+        for (const other of await loadOtherWorkspaces(workspace.key)) {
+          collect(other.memory ?? { notes: [], openItems: [] }, other.cwd);
         }
       }
 
-      const hits = [];
-      const now = Date.now();
-      for (const { workspace: cwd, record } of records) {
-        const add = (kind, item) => {
-          if (kindFilter !== 'all' && kindFilter !== kind) return;
-          const active = isMemoryActive(item, now);
-          const supersededVisible = includeSuperseded
-            && item.supersededBy
-            && !item.deleted
-            && !(typeof item.expiresAt === 'number' && item.expiresAt <= now);
-          if (!active && !supersededVisible) return;
-          if (kind === 'todo' && item.status === 'done') return;
-          // Never let a query echo (or a memory_recall tool line) become a hit.
-          const textLower = item.text.toLowerCase();
-          if (textLower === query || textLower.startsWith('memory_recall')) return;
-          const haystack = `${item.text} ${item.why} ${(item.tags ?? []).join(' ')}`.toLowerCase();
-          let score = 0;
-          if (query.length > 0) {
-            if (terms.length === 0) return;
-            const exact = haystack.includes(query) ? 30 : 0;
-            let matched = 0;
-            for (const term of terms) if (haystack.includes(term)) matched += 1;
-            const required = terms.length <= 1 ? terms.length : Math.max(2, Math.ceil(terms.length * 0.6));
-            // Prefer precision: partial matches like only "插件" must not
-            // dilute a multi-term query. An exact phrase still passes.
-            if (exact === 0 && matched < required) return;
-            score = exact
-              + matched * 6
-              + (matched === terms.length ? 8 : 0)
-              + (item.pinned ? 4 : 0)
-              + Math.max(0, 5 - (now - item.time) / DAY_MS / 7)
-              - (item.supersededBy ? 12 : 0);
-          } else {
-            score = (item.pinned ? 1000 : 0) + item.time / 1e12;
-          }
-          hits.push({
+      const eligible = pool.filter(({ kind, item }) => {
+        if (kindFilter !== 'all' && kindFilter !== kind) return false;
+        const active = isMemoryActive(item, now);
+        const supersededVisible = includeSuperseded
+          && item.supersededBy
+          && !item.deleted
+          && !(typeof item.expiresAt === 'number' && item.expiresAt <= now);
+        if (!active && !supersededVisible) return false;
+        if (kind === 'todo' && item.status === 'done') return false;
+        // Never let a query echo (or a memory_recall tool line) become a hit.
+        const textLower = item.text.toLowerCase();
+        if (textLower === rawQuery.toLowerCase() || textLower.startsWith('memory_recall')) return false;
+        return true;
+      });
+
+      // BM25 × IDF × coverage × decay × importance, see recall.js.
+      const candidates = eligible.map((entry) => entry.item);
+      const ranked = rawQuery.length > 0
+        ? search(candidates, rawQuery, { limit, now })
+        : recent(candidates, limit).map((item) => ({ item, score: 0 }));
+      const byId = new Map(eligible.map((entry) => [entry.item.id, entry]));
+
+      const matches = ranked
+        .map((hit) => {
+          const meta = byId.get(hit.item.id);
+          if (!meta) return undefined;
+          const { kind, item, workspace: cwd } = meta;
+          return {
             id: item.id,
             kind,
             workspace: cwd,
-            sessionId: record.id,
-            updatedAt: item.time,
+            sessionId: item.sessionId ?? '',
+            updatedAt: item.time ?? 0,
             text: item.text,
-            why: item.why,
+            why: item.why ?? '',
             tags: item.tags ?? [],
-            pinned: item.pinned,
+            pinned: item.pinned === true,
             status: kind === 'todo' ? item.status : '',
-            score,
+            score: typeof hit.score === 'number' ? hit.score : 0,
             supersedes: item.supersedes ?? [],
             supersededBy: item.supersededBy ?? '',
-          });
-        };
-        for (const note of record.notes ?? []) add('note', normalizeNote(note));
-        for (const item of record.openItems ?? []) add('todo', normalizeOpenItem(item));
-      }
-      hits.sort((a, b) => b.score - a.score || b.updatedAt - a.updatedAt);
-      return { matches: hits.slice(0, limit), total: hits.length };
+          };
+        })
+        .filter(Boolean);
+
+      return { matches, total: matches.length };
     },
   });
 
@@ -1731,21 +1796,20 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
     const habitPath = join(habitDirectory(), `${workspace.key}.1.txt`);
     const previousHabitPath = join(habitDirectory(), `${workspace.key}.2.txt`);
     const currentEntry = entries.get(invocation.agent.id) ?? ensureEntry(invocation.agent.session, true);
-    if (currentEntry) mergeStoredNotes(currentEntry, workspace.data.sessions[invocation.agent.id]);
+    if (currentEntry) hydrateEntry(currentEntry, workspace);
 
     if (head === 'todo') {
-      const records = collectRecords(workspace, invocation.agent.id, true);
+      const store = memoryStore(workspace);
       const lines = ['未完成事项（当前工作区）'];
       let count = 0;
-      for (const record of records) {
-        for (const item of record.openItems ?? []) {
-          if (!isMemoryActive(item)) continue;
-          if (item.status !== 'open' && item.status !== 'blocked') continue;
-          count += 1;
-          lines.push(`- [${item.status === 'blocked' ? '阻塞' : '未完成'}] ${item.text}`);
-          if (item.why) lines.push(`  为什么：${item.why}`);
-          lines.push(`  id: ${item.id} · 会话 ${record.id} · ${stamp(item.time)}`);
-        }
+      for (const raw of store.openItems ?? []) {
+        const item = normalizeOpenItem(raw);
+        if (!isMemoryActive(item)) continue;
+        if (item.status !== 'open' && item.status !== 'blocked') continue;
+        count += 1;
+        lines.push(`- [${item.status === 'blocked' ? '阻塞' : '未完成'}] ${item.text}`);
+        if (item.why) lines.push(`  为什么：${item.why}`);
+        lines.push(`  id: ${item.id} · 会话 ${item.sessionId ?? '-'} · ${stamp(item.time)}`);
       }
       if (count === 0) return { kind: 'success', text: '当前工作区没有未完成事项。' };
       lines.push('', '完成：/memory resolve <id>；钉住：/memory pin <id>');
@@ -1753,11 +1817,14 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
     }
 
     if (head === 'pins') {
-      const pinned = (currentEntry?.notes ?? []).filter((note) => note.pinned && isMemoryActive(note));
-      if (pinned.length === 0) return { kind: 'success', text: '当前会话没有钉住的要点。' };
+      const store = memoryStore(workspace);
+      const pinned = (store.notes ?? [])
+        .map((note) => normalizeNote(note))
+        .filter((note) => note.pinned && isMemoryActive(note));
+      if (pinned.length === 0) return { kind: 'success', text: '当前工作区没有钉住的要点。' };
       return {
         kind: 'success',
-        text: ['钉住的要点（当前会话）', ...pinned.map((note) => `- ${note.text}\n  id: ${note.id}${note.why ? ` · 为什么：${note.why}` : ''}`)].join('\n'),
+        text: ['钉住的要点（当前工作区）', ...pinned.map((note) => `- ${note.text}\n  id: ${note.id}${note.why ? ` · 为什么：${note.why}` : ''}`)].join('\n'),
       };
     }
 
@@ -1781,12 +1848,15 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       if (!currentEntry) return { kind: 'error', text: '当前会话没有可编辑的记忆。' };
       const found = findMemoryItem(currentEntry, id);
       if (!found) return { kind: 'error', text: `当前会话未找到条目 ${id}。` };
+      const deletedAt = Date.now();
       if (found.kind === 'note') {
         found.note.deleted = true;
-        found.note.deletedAt = Date.now();
+        found.note.deletedAt = deletedAt;
+        found.note.time = deletedAt;
       } else {
         found.item.deleted = true;
-        found.item.deletedAt = Date.now();
+        found.item.deletedAt = deletedAt;
+        found.item.time = deletedAt;
       }
       currentEntry.updatedAt = Date.now();
       await saveEntry(currentEntry);
@@ -1909,6 +1979,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
     if (head === 'clear') {
       workspace.clearAll = true;
       workspace.data.sessions = {};
+      workspace.data.memory = { version: 1, notes: [], openItems: [], updatedAt: Date.now(), migrated: 0 };
       workspace.data.updatedAt = Date.now();
       try {
         await queueWrite(workspace);
