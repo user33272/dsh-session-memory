@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）使用文档
 
-适用版本：**1.9.2**（Windows / macOS / Linux）
+适用版本：**1.9.7**（Windows / macOS / Linux）
 插件包：`dsh-session-memory`
 源码目录：`<repo>`
 
@@ -343,9 +343,9 @@
 侧边栏底部 Settings 旁新增 **「钉住」** 按钮（悬停标题「钉住记忆」）。点开后：
 
 - 按工作区分组列出所有 active + pinned 的要点/待办；
-- 显示正文、why、标签、id、时间、待办状态；
+- 显示正文、why、标签、id、时间、待办状态，并可直接取消钉住；
 - 支持刷新；非本机访问显示 local-only 提示；
-- 只读，不修改记忆，不读取身份/人格。
+- 面板本身只读展示，但「取消钉住」会写回 pinned=false；不读取身份/人格。
 
 后端是 `GET /session-memory/pins` 只读路由，只接受 loopback 请求。若 DSH Web 通过反向代理/局域网访问，面板会拒绝；这是隐私边界。
 

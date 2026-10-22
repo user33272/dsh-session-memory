@@ -861,6 +861,33 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
     return { generatedAt: Date.now(), total, workspaces };
   }
 
+  async function setPinnedInWorkspace(cwd, id, pinned) {
+    const workspace = await loadWorkspace(cwd);
+    const store = memoryStore(workspace);
+    const target = [...(store.notes ?? []), ...(store.openItems ?? [])].find((item) => item.id === id);
+    if (!target) return false;
+    target.pinned = pinned;
+    store.updatedAt = Date.now();
+    for (const entry of entries.values()) {
+      if (entry.cwdKey !== workspace.key) continue;
+      const live = [...(entry.notes ?? []), ...(entry.openItems ?? [])].find((item) => item.id === id);
+      if (live) live.pinned = pinned;
+    }
+    await queueWrite(workspace);
+    return true;
+  }
+
+  async function readRequestBody(req, limit = 16 * 1024) {
+    let size = 0;
+    const chunks = [];
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > limit) throw new Error('body-too-large');
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  }
+
   function renderCrossWorkspace(workspaces) {
     const entries = [];
     for (const workspace of workspaces) {
@@ -2092,23 +2119,63 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
           res.end(JSON.stringify({ error: 'local-only' }));
           return;
         }
-        if (req.method !== 'GET') {
-          res.writeHead(405, { 'content-type': 'application/json; charset=utf-8', allow: 'GET' });
-          res.end(JSON.stringify({ error: 'method-not-allowed' }));
+        if (req.method === 'GET') {
+          try {
+            const data = await collectPinnedMemory();
+            res.writeHead(200, {
+              'content-type': 'application/json; charset=utf-8',
+              'cache-control': 'no-store',
+            });
+            res.end(JSON.stringify(data));
+          } catch (error) {
+            report(`读取钉住面板失败: ${String(error)}`);
+            res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'read-failed' }));
+          }
           return;
         }
-        try {
-          const data = await collectPinnedMemory();
-          res.writeHead(200, {
-            'content-type': 'application/json; charset=utf-8',
-            'cache-control': 'no-store',
-          });
-          res.end(JSON.stringify(data));
-        } catch (error) {
-          report(`读取钉住面板失败: ${String(error)}`);
-          res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'read-failed' }));
+        if (req.method === 'POST') {
+          const origin = req.headers.origin;
+          if (origin) {
+            let hostname = '';
+            try {
+              hostname = new URL(origin).hostname;
+            } catch {
+              /* malformed origin */
+            }
+            if (!['127.0.0.1', '::1', '[::1]', 'localhost'].includes(hostname)) {
+              res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ error: 'cross-origin' }));
+              return;
+            }
+          }
+          if (!String(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+            res.writeHead(415, { 'content-type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'json-required' }));
+            return;
+          }
+          try {
+            const body = JSON.parse(await readRequestBody(req));
+            if (typeof body?.cwd !== 'string' || typeof body?.id !== 'string' || typeof body?.pinned !== 'boolean') {
+              res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+              res.end(JSON.stringify({ error: 'bad-request' }));
+              return;
+            }
+            const ok = await setPinnedInWorkspace(body.cwd, body.id, body.pinned);
+            res.writeHead(ok ? 200 : 404, {
+              'content-type': 'application/json; charset=utf-8',
+              'cache-control': 'no-store',
+            });
+            res.end(JSON.stringify(ok ? { ok: true, id: body.id, pinned: body.pinned } : { error: 'not-found' }));
+          } catch (error) {
+            const tooLarge = String(error).includes('body-too-large');
+            res.writeHead(tooLarge ? 413 : 500, { 'content-type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: tooLarge ? 'body-too-large' : 'write-failed' }));
+          }
+          return;
         }
+        res.writeHead(405, { 'content-type': 'application/json; charset=utf-8', allow: 'GET, POST' });
+        res.end(JSON.stringify({ error: 'method-not-allowed' }));
       },
     });
     webCtx.effect(() => dispose);

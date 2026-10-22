@@ -66,6 +66,9 @@ window.__ModuleLoader__.load({
       pinsTodo: 'Todo',
       pinsWorkspace: 'Workspace',
       pinsScopeHint: 'Pinned entries are stored per workspace; the list below is grouped by workspace.',
+      pinsBudgetHint: 'The panel shows every pin. The injected digest has a hard maxChars budget; if pins overflow it, why → tags → body are trimmed.',
+      pinsUnpin: 'Unpin',
+      pinsUnpinFailed: 'Could not unpin; the memory file may be locked or the entry moved.',
       cancel: 'Cancel',
       apply: 'Apply',
       habitsTitle: 'Interaction habits',
@@ -136,6 +139,9 @@ window.__ModuleLoader__.load({
       pinsTodo: '待办',
       pinsWorkspace: '工作区',
       pinsScopeHint: '钉住条目按工作区隔离存储；下面按工作区分组显示，标题优先用工作区名称，后面是真实路径。',
+      pinsBudgetHint: '面板显示全部钉住；注入摘要受 maxChars 硬预算约束，超出时优先保留钉住段，但会按 why → tags → 正文截断。',
+      pinsUnpin: '取消钉住',
+      pinsUnpinFailed: '取消钉住失败；记忆文件可能被占用，或条目已被移动。',
       cancel: '取消',
       apply: '确定',
       habitsTitle: '交互习惯',
@@ -371,6 +377,7 @@ window.__ModuleLoader__.load({
       const [data, setData] = React.useState(null);
       const [status, setStatus] = React.useState('idle');
       const [error, setError] = React.useState('');
+      const [busyId, setBusyId] = React.useState('');
       const snapshot = typeof useWorkspaces === 'function' ? useWorkspaces((value) => value) : undefined;
       const workspaceNames = React.useMemo(() => {
         const names = new Map();
@@ -398,6 +405,25 @@ window.__ModuleLoader__.load({
         }
       }, [t]);
 
+      const togglePin = async (cwd, id) => {
+        setBusyId(id);
+        setError('');
+        try {
+          const response = await fetch('/session-memory/pins', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ cwd, id, pinned: false }),
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          await load();
+        } catch {
+          setError(t('pinsUnpinFailed'));
+        } finally {
+          setBusyId('');
+        }
+      };
+
       React.useEffect(() => {
         if (!open) return undefined;
         void load();
@@ -421,7 +447,7 @@ window.__ModuleLoader__.load({
       }, h('path', { d: 'M6 3h12v18l-6-4-6 4V3z' }));
 
       const total = data?.total ?? 0;
-      const renderItem = (item) => h('div', {
+      const renderItem = (item, cwd) => h('div', {
         key: item.id,
         style: {
           display: 'grid', gap: '6px', padding: '10px 12px',
@@ -447,13 +473,19 @@ window.__ModuleLoader__.load({
         },
           ...(item.tags ?? []).map((tag) => h('span', { key: tag }, `#${tag}`)),
           h('code', { style: { wordBreak: 'break-all' } }, item.id),
-          h('span', {}, new Date(item.time).toLocaleString('zh-CN'))));
+          h('span', {}, new Date(item.time).toLocaleString('zh-CN')),
+          h('button', {
+            type: 'button',
+            style: { ...styles.button, padding: '2px 8px', fontSize: '11px' },
+            disabled: busyId === item.id,
+            onClick: () => void togglePin(cwd, item.id),
+          }, busyId === item.id ? '…' : t('pinsUnpin'))));
 
       const workspaceNodes = (data?.workspaces ?? []).map((workspace) => {
         const items = [
-          ...(workspace.notes ?? []).map((note) => ({ ...note, kind: 'note' })),
-          ...(workspace.todos ?? []).map((todo) => ({ ...todo, kind: 'todo' })),
-        ].map(renderItem);
+          ...(workspace.notes ?? []).map((note) => renderItem({ ...note, kind: 'note' }, workspace.cwd)),
+          ...(workspace.todos ?? []).map((todo) => renderItem({ ...todo, kind: 'todo' }, workspace.cwd)),
+        ];
         return h('section', {
           key: workspace.cwd,
           style: { display: 'grid', gap: '8px' },
@@ -521,6 +553,7 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', style: styles.button, onClick: () => void load() }, t('pinsRefresh')),
           h('button', { type: 'button', style: styles.button, onClick: () => setOpen(false) }, t('pinsClose'))),
         h('p', { style: styles.hint }, t('pinsScopeHint')),
+        h('p', { style: styles.hint }, t('pinsBudgetHint')),
         h('div', {
           style: { overflowY: 'auto', display: 'grid', gap: '14px', paddingRight: '4px' },
         }, body))), document.body) : null;      return h(React.Fragment, null,
