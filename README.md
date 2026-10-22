@@ -90,7 +90,12 @@
   - `pinned: true`：永久钉住，压缩时跳过，不随普通上限/时间窗口淘汰。
 - `memory_pin(id, pinned?)`：钉住/取消钉住；
 - `memory_resolve(id)`：把待办标记为完成，不再出现在待办/摘要里；
+- `memory_forget(id)`：永久删除一条测试/废弃记忆；
+- `supersedes: [id]`：新条目取代旧条目，旧条目不再进入摘要/召回；
+- `ttlDays`：条目过期时间；过期后不再进入摘要/召回（`pinned` 可覆盖）；
 - 每个条目有稳定 id（`memory_save` 返回，`/memory show` / `/memory todo` 可查）。
+
+召回（`memory_recall`）只查**结构化条目**（notes / openItems），不查对话、工具调用或摘要正文；默认 `kind=note`，`kind='todo'` 查待办，`kind='all'` 两者都查。关键词命中做加权，再按时间衰减排序；空查询按钉住/最近排序。
 
 摘要结构：
 
@@ -159,6 +164,7 @@
 - `/memory todo`：列出当前工作区未完成事项（带 id）；
 - `/memory pins`：列出当前会话钉住的要点；
 - `/memory pin <id>` / `/memory unpin <id>`：钉住/取消钉住；
+- `/memory forget <id>`：永久删除测试/废弃条目；
 - `/memory resolve <id>`：完成一条待办；
 - `/memory habits [show|on|off|clear]`：交互习惯；
 - `/memory identity [show|path|import]`：身份层；`import` 把模板复制到当前工作区；
@@ -169,10 +175,11 @@
 ## 模型工具
 
 - `persona_save(text)`：写入/迭代人格记忆（≤ `personaMaxChars`，自动版本化）；
-- `memory_save(note, why?, tags?, kind?, status?, pinned?)`：写要点或待办；
+- `memory_save(note, why?, tags?, kind?, status?, pinned?, supersedes?, ttlDays?)`：写要点或待办；
 - `memory_pin(id, pinned?)`：钉住/取消钉住；
 - `memory_resolve(id)`：完成待办；
-- `memory_recall(query?, limit?, scope?)`：检索工作记忆；`scope: 'all'` 时跨工作区。
+- `memory_forget(id)`：永久删除条目；
+- `memory_recall(query?, limit?, scope?, kind?)`：检索结构化工作记忆；默认 `kind=note`，无工具调用噪声。
 
 ## 配置
 

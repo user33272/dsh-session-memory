@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）插件架构
 
-适用版本：**1.5.2**
+适用版本：**1.6.2**
 源码目录：`<repo>`
 配套文档：[USAGE.md](USAGE.md)（怎么用）、[README.md](README.md)（配置速查）
 
@@ -171,8 +171,8 @@ entry = {
   createdAt, updatedAt, turns,
   items:  [{role, text, time}],   // 最近对话/工具摘要
   goals:  [第一条用户消息...],      // 早期目标
-  notes:  [{id, text, why, tags, time, pinned}],       // memory_save 要点
-  openItems: [{id, text, why, status, time, pinned}],  // 待办/阻塞
+  notes:  [{id, text, why, tags, time, pinned, expiresAt, supersededBy, deleted}], // memory_save 要点
+  openItems: [{id, text, why, status, time, pinned, expiresAt, supersededBy}],     // 待办/阻塞
   style:  {语言/格式/工具/明确要求计数},
   lastSeq, seeded, turnOpen
 }
@@ -201,6 +201,7 @@ entry = {
 - 对话优先于工具；工具最多保留最近 12 条；
 - 超出预算从最早处丢弃，并标注省略条数；
 - `notes` 永远优先放在摘要最前面；钉住要点不裁剪；未完成事项单独成段；
+- 过期/被取代/已删除条目不再进入摘要和召回；摘要只留一行“已过时/已被取代”计数；
 - 含钉住/待办/阻塞的记录不会被 `maxAgeDays` / `maxSessions` 普通裁剪删除；
 
 ### 4.5 交互习惯
@@ -277,10 +278,10 @@ collectRecords(ws, selfId, includeSelf)
 ### 4.8 工具与命令
 
 - `persona_save`：写当前工作区的 `personaRootFor(cwd)/current.md`，同时生成版本并裁剪旧版本；
-- `memory_save`：写入当前 entry 的 `notes` 或 `openItems`（带 `why`/`pinned`），并触发保存；
-- `memory_pin` / `memory_resolve`：钉住/取消钉住、完成待办；
-- `memory_recall`：扫描同 cwd 的 record digest/notes/openItems，返回匹配片段；
-- `/memory` 命令：status/show/path/preview/clear/todo/pins/pin/unpin/resolve/habits/identity/persona；
+- `memory_save`：写入当前 entry 的 `notes` 或 `openItems`（带 `why`/`pinned`/`supersedes`/`ttlDays`），并触发保存；
+- `memory_pin` / `memory_resolve` / `memory_forget`：钉住、完成、删除；
+- `memory_recall`：只扫描结构化 `notes`/`openItems`（默认 kind=note），关键词加权 + 时间衰减；不检索 digest/工具调用；
+- `/memory` 命令：status/show/path/preview/clear/todo/pins/pin/unpin/forget/resolve/habits/identity/persona；
 - `/memory habits on|off`：通过 `ctx.settings.update` 写 profile 配置，失败则只改运行期；
 - `/memory identity [show|path|import]`：查看当前工作区身份，或从模板导入；
 - `/memory persona [show|versions|clear]`：查看/列出/清除当前工作区人格记忆；

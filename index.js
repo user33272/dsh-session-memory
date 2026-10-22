@@ -23,6 +23,7 @@ import {
   capNotes,
   capOpenItems,
   clip,
+  isMemoryActive,
   memoryId,
   normalizeNote,
   normalizeOpenItem,
@@ -45,7 +46,7 @@ const CROSS_ORDER = 310;
 const HABITS_ORDER = 280;
 const FORMAT_VERSION = 1;
 const DAY_MS = 86_400_000;
-const USAGE = '/memory [status|show|path|preview|clear|todo|pins|pin <id>|unpin <id>|resolve <id>|habits [on|off|show|clear]|identity [show|path|import]|persona [show|versions|clear]|workspaces|cross <query>]';
+const USAGE = '/memory [status|show|path|preview|clear|todo|pins|pin <id>|unpin <id>|forget <id>|resolve <id>|habits [on|off|show|clear]|identity [show|path|import]|persona [show|versions|clear]|workspaces|cross <query>]';
 
 export const Config = z.object({
   directory: z.string().default(''),
@@ -471,7 +472,9 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
   }
 
   function mergeStoredNotes(entry, stored) {
-    const storedNotes = Array.isArray(stored?.notes) ? stored.notes.map((note) => normalizeNote(note)) : [];
+    const storedNotes = Array.isArray(stored?.notes)
+      ? stored.notes.map((note) => normalizeNote(note)).filter((note) => !note.deleted)
+      : [];
     const known = new Set(entry.notes.map((note) => note.id));
     for (const note of storedNotes) {
       const existing = entry.notes.find((item) => item.id === note.id);
@@ -487,7 +490,9 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
     }
     entry.notes = capNotes(entry.notes, cfg.maxNotes);
 
-    const storedOpen = Array.isArray(stored?.openItems) ? stored.openItems.map((item) => normalizeOpenItem(item)) : [];
+    const storedOpen = Array.isArray(stored?.openItems)
+      ? stored.openItems.map((item) => normalizeOpenItem(item)).filter((item) => !item.deleted)
+      : [];
     if (!Array.isArray(entry.openItems)) entry.openItems = [];
     const knownOpen = new Set(entry.openItems.map((item) => item.id));
     for (const item of storedOpen) {
@@ -979,6 +984,15 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
           type: 'boolean',
           description: 'true 表示永久钉住；压缩时跳过，不随普通要点淘汰。',
         },
+        supersedes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '可选：被这条新记忆取代的旧条目 id。旧条目会标记为已被取代，不再进入摘要/召回。',
+        },
+        ttlDays: {
+          type: 'integer',
+          description: '可选：多少天后过期（1-3650）；过期条目不再进入摘要/召回，除非 pinned。',
+        },
       },
       required: ['note'],
     },
@@ -993,13 +1007,15 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
           notes: { type: 'integer' },
           openItems: { type: 'integer' },
           pinned: { type: 'boolean' },
+          superseded: { type: 'integer' },
+          expiresAt: { type: 'integer' },
         },
-        required: ['saved', 'id', 'kind', 'notes', 'openItems', 'pinned'],
+        required: ['saved', 'id', 'kind', 'notes', 'openItems', 'pinned', 'superseded', 'expiresAt'],
       },
       render: (_args, value) => [{
         type: 'text',
         text: value.saved
-          ? `已保存${value.kind === 'todo' ? '未完成事项' : '要点'}（id: ${value.id}${value.pinned ? '，已钉住' : ''}）。当前要点 ${value.notes} 条，未完成 ${value.openItems} 条。`
+          ? `已保存${value.kind === 'todo' ? '未完成事项' : '要点'}（id: ${value.id}${value.pinned ? '，已钉住' : ''}${value.superseded > 0 ? `，取代 ${value.superseded} 条旧记忆` : ''}${value.expiresAt > 0 ? `，${new Date(value.expiresAt).toLocaleDateString('zh-CN')} 过期` : ''}）。当前要点 ${value.notes} 条，未完成 ${value.openItems} 条。`
           : '未保存。',
       }],
     },
@@ -1009,6 +1025,11 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       if (!agent) throw new Error('memory_save 需要所属会话');
       const entry = entries.get(agent.id) ?? ensureEntry(agent.session, true);
       if (!entry) throw new Error('子代理会话不参与跨会话记忆');
+      const header = agent.session?.header ?? {};
+      if (typeof header.cwd === 'string' && header.cwd.length > 0) {
+        const workspace = await loadWorkspace(header.cwd);
+        mergeStoredNotes(entry, workspace.data.sessions[agent.id]);
+      }
       const text = typeof args?.note === 'string' ? args.note.trim() : '';
       if (text.length === 0) throw new Error('note 不能为空');
       const kind = args?.kind === 'todo' ? 'todo' : 'note';
@@ -1018,6 +1039,29 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       const tags = Array.isArray(args?.tags) ? args.tags.slice(0, 5).map((tag) => clip(String(tag), 24)) : [];
       const time = Date.now();
       const id = memoryId(kind === 'todo' ? 't' : 'n', clip(text, 400), time);
+      const ttlDays = typeof args?.ttlDays === 'number' ? clampInt(args.ttlDays, 0, 1, 3650) : 0;
+      const expiresAt = ttlDays > 0 ? time + ttlDays * DAY_MS : undefined;
+      const supersedeIds = new Set(
+        (Array.isArray(args?.supersedes) ? args.supersedes : [args?.supersedes])
+          .filter((value) => typeof value === 'string' && value.length > 0),
+      );
+      let superseded = 0;
+      if (supersedeIds.size > 0) {
+        for (const note of entry.notes) {
+          if (supersedeIds.has(note.id) && !note.supersededBy) {
+            note.supersededBy = id;
+            note.supersededAt = time;
+            superseded += 1;
+          }
+        }
+        for (const item of entry.openItems ?? []) {
+          if (supersedeIds.has(item.id) && !item.supersededBy) {
+            item.supersededBy = id;
+            item.supersededAt = time;
+            superseded += 1;
+          }
+        }
+      }
       if (kind === 'todo') {
         if (!Array.isArray(entry.openItems)) entry.openItems = [];
         entry.openItems.push({
@@ -1027,10 +1071,11 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
           status: args?.status === 'blocked' ? 'blocked' : 'open',
           time,
           pinned,
+          expiresAt,
         });
         entry.openItems = capOpenItems(entry.openItems, cfg.maxOpenItems);
       } else {
-        entry.notes.push({ id, text: clip(text, 400), why, tags, time, pinned });
+        entry.notes.push({ id, text: clip(text, 400), why, tags, time, pinned, expiresAt });
         entry.notes = capNotes(entry.notes, cfg.maxNotes);
       }
       entry.updatedAt = time;
@@ -1042,6 +1087,8 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
         notes: entry.notes.length,
         openItems: (entry.openItems ?? []).filter((item) => item.status === 'open' || item.status === 'blocked').length,
         pinned,
+        superseded,
+        expiresAt: expiresAt ?? 0,
       };
     },
   });
@@ -1151,24 +1198,83 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
   });
 
   ctx.tools.register({
+    name: 'memory_forget',
+    description: '永久删除当前工作区的一条要点或未完成事项。用于清理测试条目或明确不再需要的记忆；普通收尾请用 memory_resolve，不要误删长期约定。id 来自 memory_save 返回值或 /memory show。',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: { type: 'string', description: '要删除的条目 id。' },
+      },
+      required: ['id'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          forgotten: { type: 'boolean' },
+          id: { type: 'string' },
+          kind: { type: 'string' },
+        },
+        required: ['forgotten', 'id', 'kind'],
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value.forgotten ? `已删除 ${value.id}（${value.kind === 'todo' ? '未完成事项' : '要点'}）。` : `未找到 ${value.id}。`,
+      }],
+    },
+    async execute(args, exec) {
+      const id = typeof args?.id === 'string' ? args.id.trim() : '';
+      if (!id) throw new Error('id 不能为空');
+      const agent = exec.agent;
+      if (!agent) throw new Error('memory_forget 需要所属会话');
+      const entry = entries.get(agent.id) ?? ensureEntry(agent.session, true);
+      if (!entry) throw new Error('子代理会话不参与跨会话记忆');
+      const header = agent.session?.header ?? {};
+      if (typeof header.cwd === 'string' && header.cwd.length > 0) {
+        const workspace = await loadWorkspace(header.cwd);
+        mergeStoredNotes(entry, workspace.data.sessions[agent.id]);
+      }
+      const found = findMemoryItem(entry, id);
+      if (!found) return { forgotten: false, id, kind: '' };
+      if (found.kind === 'note') {
+        found.note.deleted = true;
+        found.note.deletedAt = Date.now();
+      } else {
+        found.item.deleted = true;
+        found.item.deletedAt = Date.now();
+      }
+      entry.updatedAt = Date.now();
+      await saveEntry(entry);
+      return { forgotten: true, id, kind: found.kind };
+    },
+  });
+
+  ctx.tools.register({
     name: 'memory_recall',
-    description: '检索本机保存的工作记忆。默认只查当前工作目录；scope=all 时在已启用跨工作区读取的前提下检索其他工作区的工作记录（只含工作事实，绝不含身份/人格数据）。',
+    description: '检索本机保存的**结构化工作记忆**（notes / openItems），不检索对话、工具调用或摘要正文，避免命令行噪声。默认只查 kind=note；kind=todo 查未完成事项；kind=all 两者都查。默认按关键词相关性 + 时间衰减排序，省略 query 时按最近/钉住排序。scope=all 可查已允许的其他工作区，只含工作事实，绝不含身份/人格。',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
         query: {
           type: 'string',
-          description: '关键词；省略时返回最近的记忆。',
+          description: '关键词；省略时返回最近的结构化记忆。',
         },
         limit: {
           type: 'integer',
-          description: '返回条数，1-5，默认 3。',
+          description: '返回条数，1-5，默认 5。',
         },
         scope: {
           type: 'string',
           enum: ['workspace', 'all'],
           description: 'workspace（默认）只查当前工作目录；all 还查其他工作区的工作记录。',
+        },
+        kind: {
+          type: 'string',
+          enum: ['note', 'todo', 'all'],
+          description: 'note（默认）普通要点；todo 待办/阻塞；all 两者都查。',
         },
       },
     },
@@ -1183,12 +1289,19 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
               type: 'object',
               additionalProperties: false,
               properties: {
+                id: { type: 'string' },
+                kind: { type: 'string' },
                 workspace: { type: 'string' },
                 sessionId: { type: 'string' },
                 updatedAt: { type: 'integer' },
-                excerpt: { type: 'string' },
+                text: { type: 'string' },
+                why: { type: 'string' },
+                tags: { type: 'array', items: { type: 'string' } },
+                pinned: { type: 'boolean' },
+                status: { type: 'string' },
+                score: { type: 'number' },
               },
-              required: ['workspace', 'sessionId', 'updatedAt', 'excerpt'],
+              required: ['id', 'kind', 'workspace', 'sessionId', 'updatedAt', 'text', 'why', 'tags', 'pinned', 'status', 'score'],
             },
           },
           total: { type: 'integer' },
@@ -1198,8 +1311,14 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       render: (_args, value) => [{
         type: 'text',
         text: value.matches.length === 0
-          ? '没有找到相关的本地工作记忆。'
-          : value.matches.map((match) => `[${match.workspace} · ${match.sessionId} · ${stamp(match.updatedAt)}]\n${match.excerpt}`).join('\n\n'),
+          ? '没有找到相关的结构化工作记忆。'
+          : value.matches.map((match) => {
+            const why = match.why ? `\n为什么：${match.why}` : '';
+            const tags = match.tags.length > 0 ? ` · ${match.tags.join(', ')}` : '';
+            const pin = match.pinned ? ' · 钉住' : '';
+            const status = match.kind === 'todo' ? `（${match.status === 'blocked' ? '阻塞' : '未完成'}）` : '';
+            return `[${match.kind}${status} · ${match.workspace} · ${stamp(match.updatedAt)}]\n${match.text}${why}\nid: ${match.id}${tags}${pin}`;
+          }).join('\n\n'),
       }],
     },
     async execute(args, exec) {
@@ -1212,9 +1331,12 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       }
       const workspace = await loadWorkspace(header.cwd);
       const scope = args?.scope === 'all' ? 'all' : 'workspace';
-      const limit = clampInt(args?.limit, 3, 1, 5);
-      const query = typeof args?.query === 'string' ? args.query.trim().toLowerCase() : '';
-      const candidates = collectRecords(workspace, agent.id, true)
+      const kindFilter = args?.kind === 'todo' ? 'todo' : (args?.kind === 'all' ? 'all' : 'note');
+      const limit = clampInt(args?.limit, 5, 1, 5);
+      const rawQuery = typeof args?.query === 'string' ? args.query.trim() : '';
+      const query = rawQuery.toLowerCase();
+      const terms = [...new Set(query.split(/[\s,，。;；/|]+/u).filter((term) => term.length > 0))];
+      const records = collectRecords(workspace, agent.id, true)
         .map((record) => ({ workspace: header.cwd, record }));
       if (scope === 'all') {
         if (!cfg.crossWorkspaceEnabled) {
@@ -1222,39 +1344,52 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
         }
         const others = await loadOtherWorkspaces(workspace.key);
         for (const other of others) {
-          for (const record of other.records) candidates.push({ workspace: other.cwd, record });
+          for (const record of other.records) records.push({ workspace: other.cwd, record });
         }
       }
+
       const hits = [];
-      for (const candidate of candidates) {
-        const record = candidate.record;
-        const digest = record.digest ?? '';
-        if (query.length > 0) {
-          const haystack = [
-            record.title ?? '',
-            digest,
-            ...(record.notes ?? []).map((note) => `${note.text ?? ''} ${note.why ?? ''}`),
-            ...(record.openItems ?? []).map((item) => `${item.text ?? ''} ${item.why ?? ''}`),
-          ].join('\n').toLowerCase();
-          if (!haystack.includes(query)) continue;
-        }
-        const at = query.length > 0 ? digest.toLowerCase().indexOf(query) : -1;
-        let excerpt = at >= 0
-          ? digest.slice(Math.max(0, at - 200), at + 400)
-          : digest.slice(0, 900);
-        if (at < 0 && query.length > 0) {
-          const note = (record.notes ?? []).find((entryNote) => `${entryNote.text ?? ''} ${entryNote.why ?? ''}`.toLowerCase().includes(query));
-          if (note) excerpt = `要点：${note.text}${note.why ? `（为什么：${note.why}）` : ''}`;
-          const openItem = (record.openItems ?? []).find((item) => `${item.text ?? ''} ${item.why ?? ''}`.toLowerCase().includes(query));
-          if (!note && openItem) excerpt = `未完成事项：${openItem.text}${openItem.why ? `（为什么：${openItem.why}）` : ''}`;
-        }
-        hits.push({
-          workspace: candidate.workspace,
-          sessionId: record.id,
-          updatedAt: record.updatedAt ?? 0,
-          excerpt,
-        });
+      for (const { workspace: cwd, record } of records) {
+        const add = (kind, item) => {
+          if (kindFilter !== 'all' && kindFilter !== kind) return;
+          if (!isMemoryActive(item)) return;
+          if (kind === 'todo' && item.status === 'done') return;
+          // Never let a query echo (or a memory_recall tool line) become a hit.
+          const textLower = item.text.toLowerCase();
+          if (textLower === query || textLower.startsWith('memory_recall')) return;
+          const haystack = `${item.text} ${item.why} ${(item.tags ?? []).join(' ')}`.toLowerCase();
+          let score = 0;
+          if (query.length > 0) {
+            const exact = haystack.includes(query) ? 30 : 0;
+            let matched = 0;
+            for (const term of terms) if (haystack.includes(term)) matched += 1;
+            if (exact === 0 && matched === 0) return;
+            score = exact
+              + matched * 6
+              + (matched === terms.length ? 8 : 0)
+              + (item.pinned ? 4 : 0)
+              + Math.max(0, 5 - (Date.now() - item.time) / DAY_MS / 7);
+          } else {
+            score = (item.pinned ? 1000 : 0) + item.time / 1e12;
+          }
+          hits.push({
+            id: item.id,
+            kind,
+            workspace: cwd,
+            sessionId: record.id,
+            updatedAt: item.time,
+            text: item.text,
+            why: item.why,
+            tags: item.tags ?? [],
+            pinned: item.pinned,
+            status: kind === 'todo' ? item.status : '',
+            score,
+          });
+        };
+        for (const note of record.notes ?? []) add('note', normalizeNote(note));
+        for (const item of record.openItems ?? []) add('todo', normalizeOpenItem(item));
       }
+      hits.sort((a, b) => b.score - a.score || b.updatedAt - a.updatedAt);
       return { matches: hits.slice(0, limit), total: hits.length };
     },
   });
@@ -1483,6 +1618,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       let count = 0;
       for (const record of records) {
         for (const item of record.openItems ?? []) {
+          if (!isMemoryActive(item)) continue;
           if (item.status !== 'open' && item.status !== 'blocked') continue;
           count += 1;
           lines.push(`- [${item.status === 'blocked' ? '阻塞' : '未完成'}] ${item.text}`);
@@ -1496,7 +1632,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
     }
 
     if (head === 'pins') {
-      const pinned = (currentEntry?.notes ?? []).filter((note) => note.pinned);
+      const pinned = (currentEntry?.notes ?? []).filter((note) => note.pinned && isMemoryActive(note));
       if (pinned.length === 0) return { kind: 'success', text: '当前会话没有钉住的要点。' };
       return {
         kind: 'success',
@@ -1516,6 +1652,24 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       currentEntry.updatedAt = Date.now();
       await saveEntry(currentEntry);
       return { kind: 'success', text: `${pinned ? '已钉住' : '已取消钉住'} ${id}。` };
+    }
+
+    if (head === 'forget') {
+      const id = rest[0] ?? '';
+      if (!id) return { kind: 'error', text: '用法：/memory forget <id>' };
+      if (!currentEntry) return { kind: 'error', text: '当前会话没有可编辑的记忆。' };
+      const found = findMemoryItem(currentEntry, id);
+      if (!found) return { kind: 'error', text: `当前会话未找到条目 ${id}。` };
+      if (found.kind === 'note') {
+        found.note.deleted = true;
+        found.note.deletedAt = Date.now();
+      } else {
+        found.item.deleted = true;
+        found.item.deletedAt = Date.now();
+      }
+      currentEntry.updatedAt = Date.now();
+      await saveEntry(currentEntry);
+      return { kind: 'success', text: `已永久删除 ${id}。` };
     }
 
     if (head === 'resolve') {
@@ -1561,7 +1715,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
         `习惯备份：${previousHabitPath}`,
         `记录数：${all.length}`,
         `要点数：${currentEntry?.notes.length ?? 0}（钉住 ${currentEntry?.notes.filter((note) => note.pinned).length ?? 0}）`,
-        `未完成事项：${(currentEntry?.openItems ?? []).filter((item) => item.status === 'open' || item.status === 'blocked').length}`,
+        `未完成事项：${(currentEntry?.openItems ?? []).filter((item) => isMemoryActive(item) && (item.status === 'open' || item.status === 'blocked')).length}`,
       ];
       if (habitText) {
         lines.push('', '最新交互习惯：', clip(habitText.replace(/\n/gu, ' '), 240));
@@ -1684,7 +1838,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
     commandCtx.effect(() => commandCtx.commands.register({
       name: 'memory',
       description: '查看、预览或清除本地工作记忆、待办、钉住要点、交互习惯、身份层与人格记忆，并可按需读取其他工作区的工作记录',
-      input: { hint: '[status|show|path|preview|clear|todo|pins|pin <id>|unpin <id>|resolve <id>|habits [on|off|show|clear]|identity [show|path|import]|persona [show|versions|clear]|workspaces|cross <query>]' },
+      input: { hint: '[status|show|path|preview|clear|todo|pins|pin <id>|unpin <id>|forget <id>|resolve <id>|habits [on|off|show|clear]|identity [show|path|import]|persona [show|versions|clear]|workspaces|cross <query>]' },
       handler: memoryCommand,
     }));
   });

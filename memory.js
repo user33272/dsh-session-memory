@@ -32,6 +32,11 @@ export function normalizeNote(note, fallbackTime = Date.now()) {
     tags: Array.isArray(note?.tags) ? note.tags.slice(0, 5).map((tag) => clip(tag, 24)) : [],
     time,
     pinned: note?.pinned === true,
+    deleted: note?.deleted === true,
+    deletedAt: typeof note?.deletedAt === 'number' ? note.deletedAt : undefined,
+    expiresAt: typeof note?.expiresAt === 'number' ? note.expiresAt : undefined,
+    supersededBy: typeof note?.supersededBy === 'string' && note.supersededBy.length > 0 ? note.supersededBy : undefined,
+    supersededAt: typeof note?.supersededAt === 'number' ? note.supersededAt : undefined,
   };
 }
 
@@ -45,26 +50,42 @@ export function normalizeOpenItem(item, fallbackTime = Date.now()) {
     status: item?.status === 'blocked' ? 'blocked' : (item?.status === 'done' ? 'done' : 'open'),
     time,
     pinned: item?.pinned === true,
+    deleted: item?.deleted === true,
+    deletedAt: typeof item?.deletedAt === 'number' ? item.deletedAt : undefined,
+    expiresAt: typeof item?.expiresAt === 'number' ? item.expiresAt : undefined,
+    supersededBy: typeof item?.supersededBy === 'string' && item.supersededBy.length > 0 ? item.supersededBy : undefined,
+    supersededAt: typeof item?.supersededAt === 'number' ? item.supersededAt : undefined,
+    resolvedAt: typeof item?.resolvedAt === 'number' ? item.resolvedAt : undefined,
   };
+}
+
+/** Active entries are not done, not superseded, and not expired (unless pinned). */
+export function isMemoryActive(item, now = Date.now()) {
+  if (!item) return false;
+  if (item.deleted) return false;
+  if (item.supersededBy) return false;
+  if (item.status === 'done') return false;
+  if (typeof item.expiresAt === 'number' && item.expiresAt <= now && item.pinned !== true) return false;
+  return true;
 }
 
 /** A record is retained past the age/session window while it has pins or open items. */
 export function recordHasActive(record) {
-  const notes = Array.isArray(record?.notes) ? record.notes : [];
-  const openItems = Array.isArray(record?.openItems) ? record.openItems : [];
-  return notes.some((note) => note?.pinned === true)
-    || openItems.some((item) => item?.pinned === true || item?.status === 'open' || item?.status === 'blocked');
+  const notes = Array.isArray(record?.notes) ? record.notes.map((note) => normalizeNote(note)) : [];
+  const openItems = (Array.isArray(record?.openItems) ? record.openItems : []).map((item) => normalizeOpenItem(item));
+  return notes.some((note) => note.pinned === true && isMemoryActive(note))
+    || openItems.some((item) => isMemoryActive(item) && (item.status === 'open' || item.status === 'blocked'));
 }
 
 export function capNotes(notes, max) {
-  const normalized = notes.map((note) => normalizeNote(note));
+  const normalized = notes.map((note) => normalizeNote(note)).filter((note) => !note.deleted);
   const pinned = normalized.filter((note) => note.pinned);
   const ordinary = normalized.filter((note) => !note.pinned).slice(-Math.max(0, max));
   return [...pinned, ...ordinary].sort((a, b) => (a.time ?? 0) - (b.time ?? 0));
 }
 
 export function capOpenItems(items, max) {
-  const normalized = items.map((item) => normalizeOpenItem(item));
+  const normalized = items.map((item) => normalizeOpenItem(item)).filter((item) => !item.deleted);
   const pinned = normalized.filter((item) => item.pinned);
   const ordinary = normalized.filter((item) => !item.pinned).slice(-Math.max(1, max));
   return [...pinned, ...ordinary].sort((a, b) => (a.time ?? 0) - (b.time ?? 0));
@@ -96,11 +117,15 @@ function roleLabel(role) {
 
 /** Compress one session record into bounded markdown facts. */
 export function buildDigest(record, cfg) {
-  const notes = Array.isArray(record.notes) ? record.notes.map((note) => normalizeNote(note)) : [];
-  const openItems = (Array.isArray(record.openItems) ? record.openItems : [])
-    .map((item) => normalizeOpenItem(item))
-    .filter((item) => item.status === 'open' || item.status === 'blocked')
+  const allNotes = Array.isArray(record.notes) ? record.notes.map((note) => normalizeNote(note)) : [];
+  const allOpenItems = Array.isArray(record.openItems) ? record.openItems.map((item) => normalizeOpenItem(item)) : [];
+  const now = Date.now();
+  const notes = allNotes.filter((note) => isMemoryActive(note, now));
+  const openItems = allOpenItems
+    .filter((item) => isMemoryActive(item, now) && (item.status === 'open' || item.status === 'blocked'))
     .slice(-cfg.maxOpenItems);
+  const inactiveCount = (allNotes.length - notes.length)
+    + allOpenItems.filter((item) => !isMemoryActive(item, now) || item.status === 'done').length;
   const pinnedNotes = notes.filter((note) => note.pinned);
   const ordinaryNotes = notes.filter((note) => !note.pinned);
   const goals = Array.isArray(record.goals) ? record.goals : [];
@@ -118,6 +143,12 @@ export function buildDigest(record, cfg) {
 
   if (openItems.length > 0) {
     const text = `### 未完成事项\n${openItems.map(openItemLine).join('\n')}`;
+    parts.push(text);
+    budget -= text.length;
+  }
+
+  if (inactiveCount > 0) {
+    const text = `### 已过时/已被取代\n- 另有 ${inactiveCount} 条旧条目未展开；以最新条目和本地文件为准。`;
     parts.push(text);
     budget -= text.length;
   }

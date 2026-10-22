@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDigest, normalizeNote, normalizeOpenItem, capNotes, recordHasActive } from '../memory.js';
+import { buildDigest, normalizeNote, normalizeOpenItem, capNotes, recordHasActive, isMemoryActive } from '../memory.js';
 
 const cfg = { maxChars: 800, maxOpenItems: 20 };
 
@@ -49,6 +49,24 @@ test('resolved open items keep status done and disappear from the digest', () =>
   }, cfg);
   assert.doesNotMatch(digest, /已完成/u);
   assert.equal(recordHasActive({ openItems: [item] }), false);
+});
+
+test('superseded and expired entries are inactive; pinned overrides TTL', () => {
+  const old = normalizeNote({ id: 'n-old', text: '旧方案', time: 1, expiresAt: Date.now() - 1000 });
+  assert.equal(isMemoryActive(old), false);
+  const pinned = normalizeNote({ id: 'n-pin', text: '钉住', time: 1, pinned: true, expiresAt: Date.now() - 1000 });
+  assert.equal(isMemoryActive(pinned), true);
+  const replaced = normalizeNote({ id: 'n-new', text: '新方案', time: 2, supersededBy: 'n-x' });
+  assert.equal(isMemoryActive(replaced), false);
+  const digest = buildDigest({ notes: [old, replaced], openItems: [], goals: [], items: [] }, cfg);
+  assert.doesNotMatch(digest, /旧方案/u);
+  assert.match(digest, /已过时\/已被取代/u);
+});
+
+test('deleted entries are inactive and removed by capNotes', () => {
+  const note = normalizeNote({ id: 'n-del', text: '删除我', time: 1, deleted: true });
+  assert.equal(isMemoryActive(note), false);
+  assert.equal(capNotes([note], 10).length, 0);
 });
 
 test('recordHasActive preserves pinned notes and open items past the age window', () => {

@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）使用文档
 
-适用版本：**1.5.2**（Windows / macOS / Linux）
+适用版本：**1.6.2**（Windows / macOS / Linux）
 插件包：`dsh-session-memory`
 源码目录：`<repo>`
 
@@ -295,13 +295,23 @@
 | `why` | 一句“为什么”，跟条目一起保存、注入、检索 |
 | `status: 'open' \| 'blocked'` | 待办/阻塞 |
 | `pinned: true` | 永久钉住，压缩时跳过，不受普通时间/数量上限淘汰 |
+| `supersedes: [id]` | 新条目取代旧条目；旧条目不再进入摘要/召回 |
+| `ttlDays` | 过期天数；过期后不再进入摘要/召回（pinned 可覆盖） |
 
 相关工具/命令：
 
 - `memory_pin(id, pinned?)`、`/memory pin|unpin <id>`；
 - `memory_resolve(id)`、`/memory resolve <id>`：标记完成，不再进入摘要；
+- `memory_forget(id)`、`/memory forget <id>`：永久删除测试/废弃条目；
 - `/memory todo`：列出当前工作区待办（带 id）；
 - `/memory pins`：列出当前会话钉住的要点。
+
+召回（`memory_recall`）现在：
+
+- 只查 `notes` / `openItems` 结构化条目，**不查** 对话、工具调用、摘要正文；
+- 默认 `kind=note`；`kind='todo'` 查待办；`kind='all'` 两者都查；
+- 关键词按命中/精确短语/标签加权，再做时间衰减，不再纯时间倒序；
+- 空查询按钉住优先、最近时间排序。
 
 摘要现在包含：
 
@@ -329,6 +339,7 @@
 | `/memory todo` | 列出当前工作区未完成事项（带 id） |
 | `/memory pins` | 列出当前会话钉住的要点 |
 | `/memory pin <id>` / `/memory unpin <id>` | 钉住/取消钉住 |
+| `/memory forget <id>` | 永久删除测试/废弃条目 |
 | `/memory resolve <id>` | 完成一条待办 |
 | `/memory habits` | 查看最新习惯 |
 | `/memory habits on\|off` | 开启/关闭习惯归纳 |
@@ -349,10 +360,11 @@
 | 工具 | 作用 |
 |---|---|
 | `persona_save(text)` | 写入/迭代人格记忆（≤ `personaMaxChars`，自动版本化） |
-| `memory_save(note, why?, tags?, kind?, status?, pinned?)` | 写要点或待办 |
+| `memory_save(note, why?, tags?, kind?, status?, pinned?, supersedes?, ttlDays?)` | 写要点或待办 |
 | `memory_pin(id, pinned?)` | 钉住/取消钉住 |
 | `memory_resolve(id)` | 完成待办 |
-| `memory_recall(query?, limit?, scope?)` | 检索工作记忆；`scope: 'all'` 时跨工作区（只含工作事实） |
+| `memory_forget(id)` | 永久删除条目 |
+| `memory_recall(query?, limit?, scope?, kind?)` | 检索结构化工作记忆；默认 `kind=note`，不查工具调用 |
 
 `memory_save` 写入的要点会保存在事实记录的 `notes`，待办保存在 `openItems`；钉住项和未完成事项不会随普通摘要裁剪丢失。
 
