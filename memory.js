@@ -34,6 +34,7 @@ export function normalizeNote(note, fallbackTime = Date.now()) {
     pinned: note?.pinned === true,
     deleted: note?.deleted === true,
     deletedAt: typeof note?.deletedAt === 'number' ? note.deletedAt : undefined,
+    supersedes: Array.isArray(note?.supersedes) ? note.supersedes.filter((id) => typeof id === 'string' && id.length > 0) : [],
     expiresAt: typeof note?.expiresAt === 'number' ? note.expiresAt : undefined,
     supersededBy: typeof note?.supersededBy === 'string' && note.supersededBy.length > 0 ? note.supersededBy : undefined,
     supersededAt: typeof note?.supersededAt === 'number' ? note.supersededAt : undefined,
@@ -52,6 +53,7 @@ export function normalizeOpenItem(item, fallbackTime = Date.now()) {
     pinned: item?.pinned === true,
     deleted: item?.deleted === true,
     deletedAt: typeof item?.deletedAt === 'number' ? item.deletedAt : undefined,
+    supersedes: Array.isArray(item?.supersedes) ? item.supersedes.filter((id) => typeof id === 'string' && id.length > 0) : [],
     expiresAt: typeof item?.expiresAt === 'number' ? item.expiresAt : undefined,
     supersededBy: typeof item?.supersededBy === 'string' && item.supersededBy.length > 0 ? item.supersededBy : undefined,
     supersededAt: typeof item?.supersededAt === 'number' ? item.supersededAt : undefined,
@@ -94,13 +96,15 @@ export function capOpenItems(items, max) {
 function noteLine(note) {
   const why = note.why ? `（为什么：${note.why}）` : '';
   const tags = note.tags.length > 0 ? ` [${note.tags.join(', ')}]` : '';
-  return `- ${note.text}${why}${tags}`;
+  const replaces = note.supersedes.length > 0 ? `（取代：${note.supersedes.join(', ')}）` : '';
+  return `- ${note.text}${why}${tags}${replaces}`;
 }
 
 function openItemLine(item) {
   const label = item.status === 'blocked' ? '阻塞' : '未完成';
   const why = item.why ? `（为什么：${item.why}）` : '';
-  return `- [${label}] ${item.text}${why}（id: ${item.id}）`;
+  const replaces = item.supersedes.length > 0 ? `（取代：${item.supersedes.join(', ')}）` : '';
+  return `- [${label}] ${item.text}${why}（id: ${item.id}）${replaces}`;
 }
 
 export function ageText(ms) {

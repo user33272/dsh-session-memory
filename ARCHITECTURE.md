@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）插件架构
 
-适用版本：**1.6.2**
+适用版本：**1.6.3**
 源码目录：`<repo>`
 配套文档：[USAGE.md](USAGE.md)（怎么用）、[README.md](README.md)（配置速查）
 
@@ -280,7 +280,7 @@ collectRecords(ws, selfId, includeSelf)
 - `persona_save`：写当前工作区的 `personaRootFor(cwd)/current.md`，同时生成版本并裁剪旧版本；
 - `memory_save`：写入当前 entry 的 `notes` 或 `openItems`（带 `why`/`pinned`/`supersedes`/`ttlDays`），并触发保存；
 - `memory_pin` / `memory_resolve` / `memory_forget`：钉住、完成、删除；
-- `memory_recall`：只扫描结构化 `notes`/`openItems`（默认 kind=note），关键词加权 + 时间衰减；不检索 digest/工具调用；
+- `memory_recall`：只扫描结构化 `notes`/`openItems`（默认 kind=note），关键词加权 + 时间衰减；多词查询要求至少命中 2 个词（或 60%），不检索 digest/工具调用；`includeSuperseded` 可查看被取代条目；
 - `/memory` 命令：status/show/path/preview/clear/todo/pins/pin/unpin/forget/resolve/habits/identity/persona；
 - `/memory habits on|off`：通过 `ctx.settings.update` 写 profile 配置，失败则只改运行期；
 - `/memory identity [show|path|import]`：查看当前工作区身份，或从模板导入；

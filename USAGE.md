@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）使用文档
 
-适用版本：**1.6.2**（Windows / macOS / Linux）
+适用版本：**1.6.3**（Windows / macOS / Linux）
 插件包：`dsh-session-memory`
 源码目录：`<repo>`
 
@@ -311,6 +311,9 @@
 - 只查 `notes` / `openItems` 结构化条目，**不查** 对话、工具调用、摘要正文；
 - 默认 `kind=note`；`kind='todo'` 查待办；`kind='all'` 两者都查；
 - 关键词按命中/精确短语/标签加权，再做时间衰减，不再纯时间倒序；
+- 多词查询要求至少命中 2 个词（或 60%），避免只含「插件」的弱相关条目混进来；
+- 默认不返回已被取代的旧条目；`includeSuperseded:true` 时返回并标注 `supersededBy`；
+- 新条目会标注 `supersedes`，摘要直接跳过旧条目；
 - 空查询按钉住优先、最近时间排序。
 
 摘要现在包含：
@@ -364,7 +367,7 @@
 | `memory_pin(id, pinned?)` | 钉住/取消钉住 |
 | `memory_resolve(id)` | 完成待办 |
 | `memory_forget(id)` | 永久删除条目 |
-| `memory_recall(query?, limit?, scope?, kind?)` | 检索结构化工作记忆；默认 `kind=note`，不查工具调用 |
+| `memory_recall(query?, limit?, scope?, kind?, includeSuperseded?)` | 检索结构化工作记忆；默认 `kind=note`，不查工具调用；可看被取代条目 |
 
 `memory_save` 写入的要点会保存在事实记录的 `notes`，待办保存在 `openItems`；钉住项和未完成事项不会随普通摘要裁剪丢失。
 

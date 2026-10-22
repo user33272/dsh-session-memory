@@ -95,7 +95,7 @@
 - `ttlDays`：条目过期时间；过期后不再进入摘要/召回（`pinned` 可覆盖）；
 - 每个条目有稳定 id（`memory_save` 返回，`/memory show` / `/memory todo` 可查）。
 
-召回（`memory_recall`）只查**结构化条目**（notes / openItems），不查对话、工具调用或摘要正文；默认 `kind=note`，`kind='todo'` 查待办，`kind='all'` 两者都查。关键词命中做加权，再按时间衰减排序；空查询按钉住/最近排序。
+召回（`memory_recall`）只查**结构化条目**（notes / openItems），不查对话、工具调用或摘要正文；默认 `kind=note`，`kind='todo'` 查待办，`kind='all'` 两者都查。关键词命中做加权，再按时间衰减排序；多词查询要求至少命中 2 个词（或 60%），避免只含「插件」的弱相关条目混进来；空查询按钉住/最近排序。默认不返回已被取代的旧条目；`includeSuperseded:true` 时返回并标注 `supersededBy`，新条目会标注 `supersedes`。
 
 摘要结构：
 
@@ -179,7 +179,7 @@
 - `memory_pin(id, pinned?)`：钉住/取消钉住；
 - `memory_resolve(id)`：完成待办；
 - `memory_forget(id)`：永久删除条目；
-- `memory_recall(query?, limit?, scope?, kind?)`：检索结构化工作记忆；默认 `kind=note`，无工具调用噪声。
+- `memory_recall(query?, limit?, scope?, kind?, includeSuperseded?)`：检索结构化工作记忆；默认 `kind=note`，不查工具调用；`includeSuperseded:true` 可看被取代的旧条目并标注。
 
 ## 配置
 

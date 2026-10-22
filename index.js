@@ -1072,10 +1072,11 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
           time,
           pinned,
           expiresAt,
+          supersedes: [...supersedeIds],
         });
         entry.openItems = capOpenItems(entry.openItems, cfg.maxOpenItems);
       } else {
-        entry.notes.push({ id, text: clip(text, 400), why, tags, time, pinned, expiresAt });
+        entry.notes.push({ id, text: clip(text, 400), why, tags, time, pinned, expiresAt, supersedes: [...supersedeIds] });
         entry.notes = capNotes(entry.notes, cfg.maxNotes);
       }
       entry.updatedAt = time;
@@ -1276,6 +1277,10 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
           enum: ['note', 'todo', 'all'],
           description: 'note（默认）普通要点；todo 待办/阻塞；all 两者都查。',
         },
+        includeSuperseded: {
+          type: 'boolean',
+          description: 'true 时也返回已被取代的旧条目，并标注 supersededBy；默认 false，优先准确。',
+        },
       },
     },
     output: {
@@ -1300,8 +1305,10 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
                 pinned: { type: 'boolean' },
                 status: { type: 'string' },
                 score: { type: 'number' },
+                supersedes: { type: 'array', items: { type: 'string' } },
+                supersededBy: { type: 'string' },
               },
-              required: ['id', 'kind', 'workspace', 'sessionId', 'updatedAt', 'text', 'why', 'tags', 'pinned', 'status', 'score'],
+              required: ['id', 'kind', 'workspace', 'sessionId', 'updatedAt', 'text', 'why', 'tags', 'pinned', 'status', 'score', 'supersedes', 'supersededBy'],
             },
           },
           total: { type: 'integer' },
@@ -1317,7 +1324,9 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
             const tags = match.tags.length > 0 ? ` · ${match.tags.join(', ')}` : '';
             const pin = match.pinned ? ' · 钉住' : '';
             const status = match.kind === 'todo' ? `（${match.status === 'blocked' ? '阻塞' : '未完成'}）` : '';
-            return `[${match.kind}${status} · ${match.workspace} · ${stamp(match.updatedAt)}]\n${match.text}${why}\nid: ${match.id}${tags}${pin}`;
+            const replaced = match.supersededBy ? `\n已被 ${match.supersededBy} 取代（不再作数）` : '';
+            const replaces = match.supersedes.length > 0 ? `\n取代：${match.supersedes.join(', ')}` : '';
+            return `[${match.kind}${status} · ${match.workspace} · ${stamp(match.updatedAt)}]\n${match.text}${why}${replaced}${replaces}\nid: ${match.id}${tags}${pin}`;
           }).join('\n\n'),
       }],
     },
@@ -1332,6 +1341,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       const workspace = await loadWorkspace(header.cwd);
       const scope = args?.scope === 'all' ? 'all' : 'workspace';
       const kindFilter = args?.kind === 'todo' ? 'todo' : (args?.kind === 'all' ? 'all' : 'note');
+      const includeSuperseded = args?.includeSuperseded === true;
       const limit = clampInt(args?.limit, 5, 1, 5);
       const rawQuery = typeof args?.query === 'string' ? args.query.trim() : '';
       const query = rawQuery.toLowerCase();
@@ -1349,10 +1359,16 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       }
 
       const hits = [];
+      const now = Date.now();
       for (const { workspace: cwd, record } of records) {
         const add = (kind, item) => {
           if (kindFilter !== 'all' && kindFilter !== kind) return;
-          if (!isMemoryActive(item)) return;
+          const active = isMemoryActive(item, now);
+          const supersededVisible = includeSuperseded
+            && item.supersededBy
+            && !item.deleted
+            && !(typeof item.expiresAt === 'number' && item.expiresAt <= now);
+          if (!active && !supersededVisible) return;
           if (kind === 'todo' && item.status === 'done') return;
           // Never let a query echo (or a memory_recall tool line) become a hit.
           const textLower = item.text.toLowerCase();
@@ -1360,15 +1376,20 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
           const haystack = `${item.text} ${item.why} ${(item.tags ?? []).join(' ')}`.toLowerCase();
           let score = 0;
           if (query.length > 0) {
+            if (terms.length === 0) return;
             const exact = haystack.includes(query) ? 30 : 0;
             let matched = 0;
             for (const term of terms) if (haystack.includes(term)) matched += 1;
-            if (exact === 0 && matched === 0) return;
+            const required = terms.length <= 1 ? terms.length : Math.max(2, Math.ceil(terms.length * 0.6));
+            // Prefer precision: partial matches like only "插件" must not
+            // dilute a multi-term query. An exact phrase still passes.
+            if (exact === 0 && matched < required) return;
             score = exact
               + matched * 6
               + (matched === terms.length ? 8 : 0)
               + (item.pinned ? 4 : 0)
-              + Math.max(0, 5 - (Date.now() - item.time) / DAY_MS / 7);
+              + Math.max(0, 5 - (now - item.time) / DAY_MS / 7)
+              - (item.supersededBy ? 12 : 0);
           } else {
             score = (item.pinned ? 1000 : 0) + item.time / 1e12;
           }
@@ -1384,6 +1405,8 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
             pinned: item.pinned,
             status: kind === 'todo' ? item.status : '',
             score,
+            supersedes: item.supersedes ?? [],
+            supersededBy: item.supersededBy ?? '',
           });
         };
         for (const note of record.notes ?? []) add('note', normalizeNote(note));
