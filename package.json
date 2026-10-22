@@ -1,7 +1,7 @@
 {
   "name": "dsh-session-memory",
-  "version": "1.8.1",
-  "description": "Local DeepSeek Harness memory with per-workspace identity/persona isolation, hard-budgeted work digests, awaited atomic writes with cross-process locking and corrupt-file backups, workspace-level memory store, BM25/IDF recall with alias expansion and recency decay, and optional cross-workspace reading.",
+  "version": "1.9.0",
+  "description": "Local DeepSeek Harness memory with per-workspace identity/persona isolation, hard-budgeted work digests, awaited atomic writes with locking/backups, workspace-level BM25 recall, and a local pinned-memory panel.",
   "type": "module",
   "exports": {
     ".": "./index.js",

@@ -2,6 +2,7 @@ window.__ModuleLoader__.load({
   id: 'dsh-session-memory',
   factory(require) {
     const React = require('react');
+    const ReactDOM = require('react-dom');
     const h = React.createElement;
 
     const NS = 'sessionMemory';
@@ -50,6 +51,18 @@ window.__ModuleLoader__.load({
       crossAdd: 'Add',
       crossSelected: 'Selected: {count}',
       crossEmpty: 'No selection means no other workspaces are shared.',
+      pinsNav: 'Pinned memory',
+      pinsTitle: 'Pinned memory',
+      pinsEmpty: 'No pinned entries in any workspace.',
+      pinsRefresh: 'Refresh',
+      pinsClose: 'Close',
+      pinsLoading: 'Loading pinned memory…',
+      pinsError: 'Could not load pinned memory.',
+      pinsLocalOnly: 'This panel is available only in the local Web UI.',
+      pinsCount: '{count} pinned',
+      pinsWhy: 'Why',
+      pinsNote: 'Note',
+      pinsTodo: 'Todo',
       cancel: 'Cancel',
       apply: 'Apply',
       habitsTitle: 'Interaction habits',
@@ -105,6 +118,18 @@ window.__ModuleLoader__.load({
       crossAdd: '添加',
       crossSelected: '已选择：{count}',
       crossEmpty: '不选表示不共享任何其他工作区。',
+      pinsNav: '钉住记忆',
+      pinsTitle: '钉住记忆',
+      pinsEmpty: '所有工作区都没有钉住的条目。',
+      pinsRefresh: '刷新',
+      pinsClose: '关闭',
+      pinsLoading: '正在读取钉住记忆…',
+      pinsError: '读取钉住记忆失败。',
+      pinsLocalOnly: '该面板只在本机 Web UI 可用。',
+      pinsCount: '共 {count} 条',
+      pinsWhy: '为什么',
+      pinsNote: '要点',
+      pinsTodo: '待办',
       cancel: '取消',
       apply: '确定',
       habitsTitle: '交互习惯',
@@ -333,6 +358,158 @@ window.__ModuleLoader__.load({
         list,
         manualRow,
         footer));
+    }
+
+    function PinnedPanelButton({ wide, t }) {
+      const [open, setOpen] = React.useState(false);
+      const [data, setData] = React.useState(null);
+      const [status, setStatus] = React.useState('idle');
+      const [error, setError] = React.useState('');
+
+      const load = React.useCallback(async () => {
+        setStatus('loading');
+        setError('');
+        try {
+          const response = await fetch('/session-memory/pins', { cache: 'no-store', credentials: 'same-origin' });
+          if (response.status === 403) {
+            setStatus('local-only');
+            return;
+          }
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          setData(await response.json());
+          setStatus('ready');
+        } catch {
+          setStatus('error');
+          setError(t('pinsError'));
+        }
+      }, [t]);
+
+      React.useEffect(() => {
+        if (!open) return undefined;
+        void load();
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') setOpen(false);
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+      }, [open, load]);
+
+      const icon = h('svg', {
+        width: 18,
+        height: 18,
+        viewBox: '0 0 24 24',
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 2,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': 'true',
+      }, h('path', { d: 'M6 3h12v18l-6-4-6 4V3z' }));
+
+      const total = data?.total ?? 0;
+      const renderItem = (item) => h('div', {
+        key: item.id,
+        style: {
+          display: 'grid', gap: '6px', padding: '10px 12px',
+          border: '1px solid var(--dsw-alias-border-l1)',
+          borderRadius: '8px', background: 'var(--dsw-alias-bg-layer-1)',
+        },
+      },
+        h('div', { style: { display: 'flex', gap: '8px', alignItems: 'flex-start' } },
+          h('span', {
+            style: {
+              flex: '0 0 auto', fontSize: '11px', padding: '1px 6px',
+              borderRadius: '999px', background: 'var(--dsw-alias-bg-base)',
+              color: 'var(--dsw-alias-label-secondary)',
+            },
+          }, item.kind === 'todo' ? `${t('pinsTodo')} · ${item.status === 'blocked' ? '阻塞' : '未完成'}` : t('pinsNote')),
+          h('span', { style: { flex: '1 1 auto', wordBreak: 'break-word' } }, item.text)),
+        item.why ? h('div', { style: styles.hint }, `${t('pinsWhy')}：${item.why}`) : null,
+        h('div', {
+          style: {
+            display: 'flex', gap: '8px', flexWrap: 'wrap',
+            fontSize: '11px', color: 'var(--dsw-alias-label-secondary)',
+          },
+        },
+          ...(item.tags ?? []).map((tag) => h('span', { key: tag }, `#${tag}`)),
+          h('code', { style: { wordBreak: 'break-all' } }, item.id),
+          h('span', {}, new Date(item.time).toLocaleString('zh-CN'))));
+
+      const workspaceNodes = (data?.workspaces ?? []).map((workspace) => {
+        const items = [
+          ...(workspace.notes ?? []).map((note) => ({ ...note, kind: 'note' })),
+          ...(workspace.todos ?? []).map((todo) => ({ ...todo, kind: 'todo' })),
+        ].map(renderItem);
+        return h('section', {
+          key: workspace.cwd,
+          style: { display: 'grid', gap: '8px' },
+        },
+          h('div', {
+            style: {
+              fontSize: '12px', color: 'var(--dsw-alias-label-secondary)',
+              wordBreak: 'break-all',
+            },
+          }, workspace.cwd),
+          items);
+      });
+
+      const body = status === 'loading'
+        ? h('p', { style: styles.hint }, t('pinsLoading'))
+        : status === 'local-only'
+          ? h('p', { style: styles.hint }, t('pinsLocalOnly'))
+          : status === 'error'
+            ? h('p', { style: styles.hint }, error)
+            : status === 'ready' && total === 0
+              ? h('p', { style: styles.hint }, t('pinsEmpty'))
+              : workspaceNodes;
+
+      const overlay = open ? ReactDOM.createPortal(h('div', {
+        style: {
+          position: 'fixed', inset: 0, zIndex: 1000, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: '24px',
+          background: 'rgba(0, 0, 0, 0.45)',
+        },
+        onMouseDown: (event) => {
+          if (event.target === event.currentTarget) setOpen(false);
+        },
+      }, h('div', {
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-label': t('pinsTitle'),
+        style: {
+          width: 'min(760px, 100%)', maxHeight: '82vh', display: 'flex',
+          flexDirection: 'column', gap: '12px', padding: '18px',
+          borderRadius: '12px', border: '1px solid var(--dsw-alias-border-l1)',
+          background: 'var(--dsw-alias-bg-overlay)',
+          color: 'var(--dsw-alias-label-primary)',
+          boxShadow: '0 18px 60px rgba(0, 0, 0, 0.35)',
+        },
+      },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+          h('span', { style: { display: 'inline-flex' } }, icon),
+          h('h3', { style: { margin: 0, flex: '1 1 auto', fontSize: '15px', fontWeight: '600' } }, t('pinsTitle')),
+          status === 'ready' ? h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } }, t('pinsCount', { count: total })) : null,
+          h('button', { type: 'button', style: styles.button, onClick: () => void load() }, t('pinsRefresh')),
+          h('button', { type: 'button', style: styles.button, onClick: () => setOpen(false) }, t('pinsClose'))),
+        h('div', {
+          style: { overflowY: 'auto', display: 'grid', gap: '14px', paddingRight: '4px' },
+        }, body))), document.body) : null;      return h(React.Fragment, null,
+        h('button', {
+          type: 'button',
+          title: t('pinsNav'),
+          'aria-label': t('pinsNav'),
+          'aria-expanded': open,
+          onClick: () => setOpen((value) => !value),
+          style: {
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            gap: '8px', padding: wide ? '6px 10px' : '6px',
+            border: '1px solid var(--dsw-alias-border-l1)',
+            borderRadius: '8px', background: 'transparent',
+            color: 'var(--dsw-alias-label-primary)', cursor: 'pointer',
+            fontSize: '12px', minHeight: '32px',
+          },
+        }, icon, wide ? h('span', null, t('pinsNav')) : null),
+        overlay);
     }
 
     function SessionMemoryPage(props) {
@@ -617,6 +794,15 @@ window.__ModuleLoader__.load({
           inject: () => ({ pickDirectory, getConfigForm }),
         }, SessionMemoryPage));
       }
+      // A global panel entry beside Settings: the button opens a portal dialog
+      // with all pinned work-memory entries. The Host route is local-only.
+      ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+        name: 'sidebar.footer.action',
+        id: 'session-memory-pins',
+        order: 20,
+        label: () => t('pinsNav'),
+        locale: NS,
+      }, (props) => h(PinnedPanelButton, { ...props, t })));
       // A settings entry keyed by the Host entry id also gives the manager a
       // row-independent page whose form it can supply directly.
       ctx.slots.inject('plugins.item', () => ctx.slots.register({

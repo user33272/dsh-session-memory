@@ -101,9 +101,15 @@ ALL CHECKS PASSED
 
 当前验证：单元测试 5 个文件全绿（recall 17 / memory 8 / store 7 / identity 6 / persona 4）；集成冒烟 23 项全过。
 
-## 七、还没做 / 需要你定的
+## 七、1.9.0 钉住面板
 
-1. **没有在真实 DSH 进程里安装验证**（沙箱只能改 `D:\test`）。但 Host 半已经在桩 Context 下跑通全部真实代码路径（记录、去重、召回、命令、落盘、二次启动），剩下的是打包/装载环节。落地步骤：复制文件 → `pnpm pack` → `plugin_manager remove_bundle` / `install_bundle` → 重启 DSH。
+- 新增 Host 只读路由 `GET /session-memory/pins`：扫描所有工作区 JSON 的 `memory`，返回 active+pinned 的要点/待办；只接受 loopback 请求，不读取 persona/identity，不写文件。
+- Client 在 `sidebar.footer.action` 增加「钉住记忆」按钮；点击后用 portal 打开只读弹窗，按工作区分组显示正文、why、标签、id、时间、待办状态，支持刷新和空/错误/非本机提示。
+- 已在真实 DSH profile 安装 1.9.0 并验证路由返回 3 个工作区的钉住条目；slot 注册已确认。
+
+## 八、还没做 / 需要你定的
+
+1. **已在真实 DSH 进程安装验证到 1.9.0**：Host 路由、真实会话工具调用、slot 注册均已确认；完整重启仍建议做一次，让所有已有 agent 走新代码。
 2. **自动注入没换成 meow-memory 的“每条用户消息 top-2”**。那需要接管 client 消息流与压缩事件，改的是注入层，不在这轮“存取”范围内；如果你要，我在下一轮单独做。
 3. **去重阈值 0.75 是我拍的**。真实语料跑一段后可能需要调；`recall.js` 顶部 `RANKING` 都可以改。
 4. 中文同义词表只放了 15 组常用词，按需在 `ALIAS_GROUPS` 里加。

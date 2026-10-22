@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）使用文档
 
-适用版本：**1.8.1**（Windows / macOS / Linux）
+适用版本：**1.9.0**（Windows / macOS / Linux）
 插件包：`dsh-session-memory`
 源码目录：`<repo>`
 
@@ -335,6 +335,19 @@
 - 召回用 [`recall.js`](recall.js)：保存时抽 `kw` 关键词（CJK bigram + 英文词），查询时 BM25 + IDF + 覆盖率 + 30 天衰减 + 钉住/阻塞/why 重要度；同义词表在 `ALIAS_GROUPS`，阈值在 `RANKING`。
 - 写入自动去重：正文归一化相同，或全文 token Jaccard ≥ 0.75，则更新原条目并返回 `merged: true`。
 - `maxNotes` 现在是**每个工作区**的普通要点上限；`maxOpenItems` 同理。
+
+---
+
+## 7.7 钉住面板
+
+侧边栏底部 Settings 旁新增 **「钉住记忆」** 按钮。点开后：
+
+- 按工作区分组列出所有 active + pinned 的要点/待办；
+- 显示正文、why、标签、id、时间、待办状态；
+- 支持刷新；非本机访问显示 local-only 提示；
+- 只读，不修改记忆，不读取身份/人格。
+
+后端是 `GET /session-memory/pins` 只读路由，只接受 loopback 请求。若 DSH Web 通过反向代理/局域网访问，面板会拒绝；这是隐私边界。
 
 ---
 

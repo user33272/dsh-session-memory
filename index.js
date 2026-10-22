@@ -821,6 +821,46 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
     return workspaces.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
+  async function collectPinnedMemory() {
+    let names = [];
+    try {
+      names = await readdir(cfg.directory);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    const workspaces = [];
+    let total = 0;
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue;
+      const file = join(cfg.directory, name);
+      let data;
+      try {
+        data = JSON.parse(await readFile(file, 'utf8'));
+      } catch {
+        continue;
+      }
+      if (!data || data.version !== FORMAT_VERSION || !data.sessions || typeof data.sessions !== 'object') continue;
+      const store = ensureMemoryStore(data);
+      const notes = store.notes
+        .map((note) => normalizeNote(note))
+        .filter((note) => note.pinned === true && isMemoryActive(note))
+        .sort((a, b) => (b.time ?? 0) - (a.time ?? 0));
+      const todos = store.openItems
+        .map((item) => normalizeOpenItem(item))
+        .filter((item) => item.pinned === true && isMemoryActive(item) && (item.status === 'open' || item.status === 'blocked'))
+        .sort((a, b) => (b.time ?? 0) - (a.time ?? 0));
+      if (notes.length === 0 && todos.length === 0) continue;
+      total += notes.length + todos.length;
+      workspaces.push({ cwd: typeof data.cwd === 'string' ? data.cwd : '(unknown)', notes, todos });
+      if (total >= 200) break;
+    }
+    workspaces.sort((a, b) => {
+      const latest = (entry) => Math.max(...[...entry.notes, ...entry.todos].map((item) => item.time ?? 0), 0);
+      return latest(b) - latest(a);
+    });
+    return { generatedAt: Date.now(), total, workspaces };
+  }
+
   function renderCrossWorkspace(workspaces) {
     const entries = [];
     for (const workspace of workspaces) {
@@ -2039,6 +2079,40 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
 
     return { kind: 'error', text: `未知参数「${head}」。用法：${USAGE}` };
   }
+
+  ctx.inject(['webServer'], (webCtx) => {
+    const dispose = webCtx.webServer.register({
+      kind: 'exact',
+      path: '/session-memory/pins',
+      handler: async (req, res) => {
+        const remote = req.socket?.remoteAddress ?? '';
+        const local = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+        if (!local) {
+          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'local-only' }));
+          return;
+        }
+        if (req.method !== 'GET') {
+          res.writeHead(405, { 'content-type': 'application/json; charset=utf-8', allow: 'GET' });
+          res.end(JSON.stringify({ error: 'method-not-allowed' }));
+          return;
+        }
+        try {
+          const data = await collectPinnedMemory();
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end(JSON.stringify(data));
+        } catch (error) {
+          report(`读取钉住面板失败: ${String(error)}`);
+          res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'read-failed' }));
+        }
+      },
+    });
+    webCtx.effect(() => dispose);
+  });
 
   ctx.inject(['commands'], (commandCtx) => {
     commandCtx.effect(() => commandCtx.commands.register({
