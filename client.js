@@ -52,6 +52,7 @@ window.__ModuleLoader__.load({
       crossSelected: 'Selected: {count}',
       crossEmpty: 'No selection means no other workspaces are shared.',
       pinsNav: 'Pinned memory',
+      pinsNavShort: 'Pins',
       pinsTitle: 'Pinned memory',
       pinsEmpty: 'No pinned entries in any workspace.',
       pinsRefresh: 'Refresh',
@@ -119,6 +120,7 @@ window.__ModuleLoader__.load({
       crossSelected: '已选择：{count}',
       crossEmpty: '不选表示不共享任何其他工作区。',
       pinsNav: '钉住记忆',
+      pinsNavShort: '钉住',
       pinsTitle: '钉住记忆',
       pinsEmpty: '所有工作区都没有钉住的条目。',
       pinsRefresh: '刷新',
@@ -502,13 +504,13 @@ window.__ModuleLoader__.load({
           onClick: () => setOpen((value) => !value),
           style: {
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            gap: '8px', padding: wide ? '6px 10px' : '6px',
+            gap: '6px', padding: wide ? '5px 8px' : '6px',
             border: '1px solid var(--dsw-alias-border-l1)',
             borderRadius: '8px', background: 'transparent',
             color: 'var(--dsw-alias-label-primary)', cursor: 'pointer',
-            fontSize: '12px', minHeight: '32px',
+            fontSize: '11px', minHeight: '28px', whiteSpace: 'nowrap',
           },
-        }, icon, wide ? h('span', null, t('pinsNav')) : null),
+        }, icon, wide ? h('span', { style: { whiteSpace: 'nowrap' } }, t('pinsNavShort')) : null),
         overlay);
     }
 
