@@ -92,7 +92,7 @@
 - `memory_resolve(id)`：把待办标记为完成，不再出现在待办/摘要里；
 - `memory_forget(id)`：永久删除一条测试/废弃记忆；
 - `supersedes: [id]`：新条目取代旧条目，旧条目不再进入摘要/召回；
-- `ttlDays`：条目过期时间；过期后不再进入摘要/召回（`pinned` 可覆盖）；
+- `ttlDays`：条目过期时间（0 = 不过期）；过期后不再进入摘要/召回（`pinned` 可覆盖）；
 - 每个条目有稳定 id（`memory_save` 返回，`/memory show` / `/memory todo` 可查）。
 
 召回（`memory_recall`）只查**结构化条目**（notes / openItems），不查对话、工具调用或摘要正文；默认 `kind=note`，`kind='todo'` 查待办，`kind='all'` 两者都查。关键词命中做加权，再按时间衰减排序；多词查询要求至少命中 2 个词（或 60%），避免只含「插件」的弱相关条目混进来；空查询按钉住/最近排序。默认不返回已被取代的旧条目；`includeSuperseded:true` 时返回并标注 `supersededBy`，新条目会标注 `supersedes`。
@@ -100,7 +100,7 @@
 摘要结构：
 
 ```markdown
-### 长期要点（钉住，跳过压缩）
+### 长期要点（钉住，有总预算）
 - ...（为什么：...）
 
 ### 未完成事项
@@ -160,7 +160,7 @@
 - `/memory show`：身份 → 人格 → 习惯 → 最近事实；
 - `/memory preview`：打印下次注入的完整顺序；
 - `/memory path`：工作记录文件路径；
-- `/memory clear`：只清该工作区的事实、要点与待办；
+- `/memory clear`：清当前工作区持久事实、要点、待办，并同步重置 live 条目的对话/目标；
 - `/memory todo`：列出当前工作区未完成事项（带 id）；
 - `/memory pins`：列出当前会话钉住的要点；
 - `/memory pin <id>` / `/memory unpin <id>`：钉住/取消钉住；
@@ -212,6 +212,15 @@
     habitsEnabled: true
     habitsMaxChars: 600
 ```
+
+## 写入与并发
+
+- `saveEntry` 等待落盘完成后才返回；失败会抛出，不再先回 `saved:true` 再静默丢数据。
+- 写入前获取 `<workspace>.json.lock`（跨进程），读-合并-写；同一工作区的多进程不会整文件互相覆盖。
+- 原子写仍用临时文件 + rename；锁超时或写入失败会显式报错。
+- 损坏/版本不符的 JSON 会先重命名为 `.corrupt-<时间戳>`，备份失败则拒绝覆盖，不再当空文件写回。
+- 摘要 `maxChars` 是**硬上限**：钉住、待办、普通要点、目标、对话、工具全部计入；钉住段有 45% 总预算，超了按 why → tags → 正文截断。
+- `/memory clear` 在落盘成功后同时重置当前 live 条目的 items/goals/style，避免下一回合把旧对话写回。
 
 ## 说明与限制
 

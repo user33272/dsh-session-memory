@@ -71,6 +71,23 @@ export function isMemoryActive(item, now = Date.now()) {
   return true;
 }
 
+/** Merge a fresh disk read with this process's local workspace view.
+ * Sessions are unioned; for the same session the newer updatedAt wins. */
+export function mergeWorkspaceData(disk, local) {
+  if (!disk) return local;
+  const merged = { ...disk, ...local };
+  const sessions = { ...(disk.sessions ?? {}) };
+  for (const [id, record] of Object.entries(local.sessions ?? {})) {
+    const previous = sessions[id];
+    if (!previous || (record?.updatedAt ?? 0) >= (previous?.updatedAt ?? 0)) {
+      sessions[id] = record;
+    }
+  }
+  merged.sessions = sessions;
+  merged.updatedAt = Math.max(disk.updatedAt ?? 0, local.updatedAt ?? 0, Date.now());
+  return merged;
+}
+
 /** A record is retained past the age/session window while it has pins or open items. */
 export function recordHasActive(record) {
   const notes = Array.isArray(record?.notes) ? record.notes.map((note) => normalizeNote(note)) : [];
@@ -119,62 +136,135 @@ function roleLabel(role) {
   return '工具';
 }
 
-/** Compress one session record into bounded markdown facts. */
+/** Compress one session record into a hard-bounded markdown digest.
+ *
+ * Budget priority: pinned notes (capped) → open items (capped) → ordinary
+ * notes → goals → dialog → tools. Nothing may push the final digest past
+ * cfg.maxChars; when a line does not fit we drop why first, then tags, then
+ * trim the body. Pinned notes are prioritised, not exempt from the total cap.
+ */
 export function buildDigest(record, cfg) {
+  const max = Math.max(200, Math.trunc(cfg.maxChars));
   const allNotes = Array.isArray(record.notes) ? record.notes.map((note) => normalizeNote(note)) : [];
   const allOpenItems = Array.isArray(record.openItems) ? record.openItems.map((item) => normalizeOpenItem(item)) : [];
   const now = Date.now();
   const notes = allNotes.filter((note) => isMemoryActive(note, now));
-  const openItems = allOpenItems
-    .filter((item) => isMemoryActive(item, now) && (item.status === 'open' || item.status === 'blocked'))
-    .slice(-cfg.maxOpenItems);
+  const openItems = capOpenItems(
+    allOpenItems.filter((item) => isMemoryActive(item, now) && (item.status === 'open' || item.status === 'blocked')),
+    cfg.maxOpenItems,
+  );
   const inactiveCount = (allNotes.length - notes.length)
     + allOpenItems.filter((item) => !isMemoryActive(item, now) || item.status === 'done').length;
   const pinnedNotes = notes.filter((note) => note.pinned);
   const ordinaryNotes = notes.filter((note) => !note.pinned);
   const goals = Array.isArray(record.goals) ? record.goals : [];
   const items = Array.isArray(record.items) ? record.items : [];
+
+  const fitNote = (note, budget) => {
+    if (budget < 8) return '';
+    const build = (withWhy, withTags) => {
+      const why = withWhy && note.why ? `（为什么：${note.why}）` : '';
+      const tags = withTags && note.tags.length > 0 ? ` [${note.tags.join(', ')}]` : '';
+      return `- ${note.text}${why}${tags}`;
+    };
+    for (const [withWhy, withTags] of [[true, true], [false, true], [false, false]]) {
+      const line = build(withWhy, withTags);
+      if (line.length <= budget) return line;
+    }
+    return trimTo(build(false, false), budget);
+  };
+
+  const fitOpenItem = (item, budget) => {
+    if (budget < 8) return '';
+    const label = item.status === 'blocked' ? '阻塞' : '未完成';
+    const prefix = `- [${label}] `;
+    const id = `（id: ${item.id}）`;
+    const build = (withWhy, withSupersedes) => {
+      const why = withWhy && item.why ? `（为什么：${item.why}）` : '';
+      const replaces = withSupersedes && item.supersedes.length > 0 ? `（取代：${item.supersedes.join(', ')}）` : '';
+      return `${prefix}${item.text}${why}${id}${replaces}`;
+    };
+    for (const [withWhy, withSupersedes] of [[true, true], [false, true], [false, false]]) {
+      const line = build(withWhy, withSupersedes);
+      if (line.length <= budget) return line;
+    }
+    const suffix = id.length < budget - prefix.length - 1 ? id : '';
+    const room = budget - prefix.length - suffix.length;
+    if (room < 2) return trimTo(`${prefix}${item.text}`, budget);
+    return `${prefix}${trimTo(item.text, room)}${suffix}`;
+  };
+
+  const renderSection = (title, entries, sectionBudget, render) => {
+    const budget = Math.min(sectionBudget, remaining);
+    const header = `### ${title}\n`;
+    if (budget <= header.length + 4) return '';
+    let body = '';
+    for (const entry of entries) {
+      const separator = body.length > 0 ? 1 : 0;
+      const lineBudget = budget - header.length - body.length - separator;
+      if (lineBudget < 8) break;
+      const line = render(entry, lineBudget);
+      if (!line) break;
+      body += `${separator ? '\n' : ''}${line}`;
+    }
+    return body.length > 0 ? `${header}${body}` : '';
+  };
+
   const parts = [];
-  let budget = Math.max(200, cfg.maxChars);
+  let remaining = max;
 
-  // Pinned notes are deliberately exempt from trimming: they are the user's
-  // explicit "keep this" signal and may exceed the normal digest budget.
+  const pinnedBudget = Math.floor(max * 0.45);
   if (pinnedNotes.length > 0) {
-    const text = `### 长期要点（钉住，跳过压缩）\n${pinnedNotes.map(noteLine).join('\n')}`;
+    const section = renderSection('长期要点（钉住，有总预算）', pinnedNotes, pinnedBudget, fitNote);
+    if (section) {
+      parts.push(section);
+      remaining -= section.length;
+    }
+  }
+
+  const openBudget = Math.floor(max * 0.3);
+  if (openItems.length > 0 && remaining > 0) {
+    const section = renderSection('未完成事项', openItems, openBudget, fitOpenItem);
+    if (section) {
+      parts.push(section);
+      remaining -= section.length;
+    }
+  }
+
+  if (inactiveCount > 0 && remaining > 80) {
+    const text = trimTo(
+      `### 已过时/已被取代\n- 另有 ${inactiveCount} 条旧条目未展开；以最新条目和本地文件为准。`,
+      Math.min(140, remaining),
+    );
     parts.push(text);
-    budget -= text.length;
+    remaining -= text.length;
   }
 
-  if (openItems.length > 0) {
-    const text = `### 未完成事项\n${openItems.map(openItemLine).join('\n')}`;
-    parts.push(text);
-    budget -= text.length;
+  const ordinaryBudget = Math.floor(max * 0.2);
+  if (ordinaryNotes.length > 0 && remaining > 0) {
+    const section = renderSection('已保存的要点', ordinaryNotes, ordinaryBudget, fitNote);
+    if (section) {
+      parts.push(section);
+      remaining -= section.length;
+    }
   }
 
-  if (inactiveCount > 0) {
-    const text = `### 已过时/已被取代\n- 另有 ${inactiveCount} 条旧条目未展开；以最新条目和本地文件为准。`;
-    parts.push(text);
-    budget -= text.length;
+  const goalBudget = Math.floor(max * 0.15);
+  if (goals.length > 0 && remaining > 0) {
+    const section = renderSection(
+      '早期目标（可能已过时）',
+      goals,
+      goalBudget,
+      (goal, budget) => trimTo(`- ${goal}`, budget),
+    );
+    if (section) {
+      parts.push(section);
+      remaining -= section.length;
+    }
   }
 
-  if (ordinaryNotes.length > 0) {
-    const text = `### 已保存的要点\n${ordinaryNotes.map(noteLine).join('\n')}`;
-    const trimmed = trimTo(text, Math.min(900, Math.floor(Math.max(120, budget) * 0.35)));
-    parts.push(trimmed);
-    budget -= trimmed.length;
-  }
-
-  if (goals.length > 0) {
-    const text = `### 早期目标（可能已过时）\n${goals.map((goal) => `- ${goal}`).join('\n')}`;
-    const trimmed = trimTo(text, Math.min(700, Math.floor(Math.max(120, budget) * 0.3)));
-    parts.push(trimmed);
-    budget -= trimmed.length;
-  }
-
+  const dialogBudget = Math.max(0, remaining - Math.min(80, Math.floor(remaining * 0.2)) - 2);
   const dialog = items.filter((item) => item.role !== 'tool');
-  const tools = items.filter((item) => item.role === 'tool').slice(-12);
-
-  const dialogBudget = Math.max(120, Math.floor(Math.max(120, budget) * 0.75));
   const dialogLines = dialog.map((item) => `- ${roleLabel(item.role)}：${item.text}`);
   let omitted = 0;
   let dialogBody = dialogLines.join('\n');
@@ -183,21 +273,31 @@ export function buildDigest(record, cfg) {
     omitted += 1;
     dialogBody = dialogLines.join('\n');
   }
-  if (dialogBody.length > 0) {
+  if (dialogBody.length > 0 && dialogBudget > 0) {
     if (omitted > 0) dialogBody = `（更早的 ${omitted} 条对话已省略）\n${dialogBody}`;
-    parts.push(`### 最近对话\n${dialogBody}`);
-    budget -= dialogBody.length;
+    const text = trimTo(`### 最近对话\n${dialogBody}`, dialogBudget);
+    parts.push(text);
+    remaining -= text.length;
   }
 
-  if (tools.length > 0 && budget > 80) {
-    const toolLines = tools.map((item) => `- ${item.text}`);
-    let toolBody = toolLines.join('\n');
-    while (toolBody.length > budget && toolLines.length > 0) {
-      toolLines.shift();
-      toolBody = toolLines.join('\n');
+  if (remaining > 80) {
+    const tools = items.filter((item) => item.role === 'tool').slice(-12);
+    if (tools.length > 0) {
+      const toolLines = tools.map((item) => `- ${item.text}`);
+      let toolBody = toolLines.join('\n');
+      while (toolBody.length > remaining - 20 && toolLines.length > 0) {
+        toolLines.shift();
+        toolBody = toolLines.join('\n');
+      }
+      if (toolBody.length > 0) {
+        const text = trimTo(`### 最近工具调用\n${toolBody}`, remaining);
+        parts.push(text);
+        remaining -= text.length;
+      }
     }
-    if (toolBody.length > 0) parts.push(`### 最近工具调用\n${toolBody}`);
   }
 
-  return parts.join('\n\n');
+  let result = parts.filter(Boolean).join('\n\n');
+  if (result.length > max) result = trimTo(result, max);
+  return result;
 }

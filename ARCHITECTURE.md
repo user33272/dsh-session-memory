@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）插件架构
 
-适用版本：**1.6.3**
+适用版本：**1.7.1**
 源码目录：`<repo>`
 配套文档：[USAGE.md](USAGE.md)（怎么用）、[README.md](README.md)（配置速查）
 
@@ -115,7 +115,7 @@ Host 行在 Loader 中的身份：
             ├─ 合并历史 notes（防止重载丢失）
             ├─ buildDigest()      → 事实摘要
             ├─ writeHabitFile()   → 规则归纳习惯，最多两份 txt
-            └─ queueWrite()       → 临时文件 + rename 原子写入
+            └─ queueWrite()       → 跨进程锁 + 读-合并-写 + rename
 
 根代理 agent/created
   ├─ attachIdentity()
@@ -197,10 +197,10 @@ entry = {
 
 压缩策略：
 
-- 事实摘要上限 `maxChars`（默认 3000）；
+- 事实摘要上限 `maxChars`（默认 3000）是**硬上限**；
+- 钉住段有 45% 总预算，未完成事项 30%，普通要点 20%，目标 15%，其余给对话/工具；超了按 why → tags → 正文截断；
 - 对话优先于工具；工具最多保留最近 12 条；
-- 超出预算从最早处丢弃，并标注省略条数；
-- `notes` 永远优先放在摘要最前面；钉住要点不裁剪；未完成事项单独成段；
+- `notes` 优先放在摘要最前面；未完成事项单独成段；
 - 过期/被取代/已删除条目不再进入摘要和召回；摘要只留一行“已过时/已被取代”计数；
 - 含钉住/待办/阻塞的记录不会被 `maxAgeDays` / `maxSessions` 普通裁剪删除；
 
@@ -235,20 +235,20 @@ loadWorkspace(cwd)
   ├─ workspaceKey = sha1(normalize(cwd)).slice(0,16)
   ├─ 文件：<root>/<workspaceKey>.json
   ├─ 缓存：Map<key, {data, ready, queue}>
-  └─ 解析失败/版本不符 → 空数据并告警
+  └─ 解析失败/版本不符 → 先备份为 `.corrupt-<时间戳>`；备份失败则阻止覆盖
 
 saveEntry(entry)
   ├─ 合并已持久化的 notes（重载不丢）
   ├─ workspace.sessions[entry.id] = toRecord(...)
   ├─ prune()：按 maxAgeDays / maxSessions 清理
-  ├─ queueWrite()：临时文件 + rename 原子写
+  ├─ queueWrite()：获取跨进程 `.lock`，读-合并-写；临时文件 + rename
   └─ writeHabitFile()
 
 collectRecords(ws, selfId, includeSelf)
   └─ 合并“持久化记录”与“当前 live entries”，按 updatedAt 倒序
 ```
 
-写入是**串行队列**，避免同一工作区的并发写互相覆盖。
+写入是**进程内串行队列 + 跨进程文件锁**：拿到 `<key>.json.lock` 后重读磁盘、按 session updatedAt 合并、再原子写；`saveEntry` 会 await，失败向上抛，不再静默。
 
 ### 4.7 恢复与注入
 
@@ -390,9 +390,10 @@ props.form
 | 身份 100 < 人格 150 < 习惯 280 < 事实 300 | `renderPrompt` 按 order 拼接，保证人格数据先于工作数据 |
 | 人格与工作**目录/命令/清除分离** | 人格可独立备份/回滚，工作数据可独立清理 |
 | 人格摘要**整体替换 + 版本化 + 上限** | 防止人格数据无限增长；旧版本可回滚 |
-| 钉住/未完成事项跳过普通裁剪 | 用户显式保留的条目和待办不随时间/数量上限消失 |
+| 钉住/未完成事项跳过普通裁剪 | 用户显式保留的条目和待办不随时间/数量上限消失（但受摘要硬预算约束） |
 | 记录在 `turn/end` 保存 | 回合边界稳定，不打断流式输出 |
-| 写入用临时文件 + rename | 避免半截 JSON |
+| 写入用临时文件 + rename + 跨进程锁 | 避免半截 JSON 和多进程整文件覆盖 |
+| 损坏文件先 `.corrupt` 备份 | 避免把解析失败当空数据写回，原文件丢失 |
 | notes 跨重载合并 | notes 不在会话日志里，重载会丢；合并修复 |
 | 默认 `directory` 留空 | 用 `$DSH_HOME` 的相对默认，便于迁移 |
 

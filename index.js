@@ -10,7 +10,7 @@
  *
  * @module dsh-session-memory
  */
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, basename, dirname, resolve } from 'node:path';
@@ -25,6 +25,7 @@ import {
   clip,
   isMemoryActive,
   memoryId,
+  mergeWorkspaceData,
   normalizeNote,
   normalizeOpenItem,
   recordHasActive,
@@ -393,6 +394,75 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
     }
   }
 
+  async function backupCorrupt(file, reason) {
+    const backup = `${file}.corrupt-${Date.now()}`;
+    try {
+      await rename(file, backup);
+      report(`${reason}；已备份为 ${backup}`);
+      return backup;
+    } catch (error) {
+      report(`${reason}；备份失败 ${file}: ${String(error)}`);
+      return '';
+    }
+  }
+
+  async function readWorkspaceFile(file) {
+    let raw;
+    try {
+      raw = await readFile(file, 'utf8');
+    } catch (error) {
+      if (error?.code === 'ENOENT') return null;
+      throw error;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.version === FORMAT_VERSION && parsed.sessions && typeof parsed.sessions === 'object') {
+        return parsed;
+      }
+    } catch {
+      /* fall through to backup */
+    }
+    const backup = await backupCorrupt(file, `无法识别的记忆文件 ${file}`);
+    if (!backup) throw new Error(`记忆文件损坏且无法备份，拒绝覆盖: ${file}`);
+    return null;
+  }
+
+  async function acquireLock(file, timeoutMs = 10_000) {
+    const lockFile = `${file}.lock`;
+    const started = Date.now();
+    for (;;) {
+      try {
+        const handle = await open(lockFile, 'wx');
+        await handle.writeFile(`${process.pid}:${Date.now()}\n`, 'utf8');
+        return async () => {
+          try {
+            await handle.close();
+          } catch {
+            /* ignore */
+          }
+          await rm(lockFile, { force: true }).catch(() => {});
+        };
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error;
+        let stale = false;
+        try {
+          const info = await stat(lockFile);
+          stale = Date.now() - info.mtimeMs > 30_000;
+        } catch {
+          /* lock disappeared between attempts */
+        }
+        if (stale) {
+          await rm(lockFile, { force: true }).catch(() => {});
+          continue;
+        }
+        if (Date.now() - started > timeoutMs) {
+          throw new Error(`获取工作区写锁超时: ${lockFile}`);
+        }
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 50 + Math.floor(Math.random() * 100)));
+      }
+    }
+  }
+
   async function loadWorkspace(cwd) {
     const key = workspaceKey(cwd);
     const cached = workspaceCache.get(key);
@@ -407,19 +477,17 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       data: { version: FORMAT_VERSION, cwd: resolve(cwd), updatedAt: 0, sessions: {} },
       queue: Promise.resolve(),
       ready: undefined,
+      clearAll: false,
+      writeBlocked: false,
     };
     workspaceCache.set(key, workspace);
     workspace.ready = (async () => {
       try {
-        const raw = await readFile(workspace.file, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (parsed && parsed.version === FORMAT_VERSION && parsed.sessions && typeof parsed.sessions === 'object') {
-          workspace.data = parsed;
-          return;
-        }
-        report(`忽略无法识别的记忆文件 ${workspace.file}`);
+        const parsed = await readWorkspaceFile(workspace.file);
+        if (parsed) workspace.data = parsed;
       } catch (error) {
-        if (error?.code !== 'ENOENT') report(`读取记忆失败 ${workspace.file}: ${String(error)}`);
+        workspace.writeBlocked = true;
+        report(`读取记忆失败，已阻止覆盖 ${workspace.file}: ${String(error)}`);
       }
     })();
     await workspace.ready;
@@ -440,16 +508,30 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
   }
 
   function queueWrite(workspace) {
-    workspace.queue = workspace.queue.then(async () => {
-      prune(workspace);
+    const run = workspace.queue.then(async () => {
+      if (workspace.writeBlocked) {
+        throw new Error(`工作区记忆处于只读保护状态，拒绝覆盖: ${workspace.file}`);
+      }
       await mkdir(cfg.directory, { recursive: true });
-      const temp = `${workspace.file}.${process.pid}.tmp`;
-      await writeFile(temp, JSON.stringify(workspace.data, null, 2), 'utf8');
-      await rename(temp, workspace.file);
-    }).catch((error) => {
-      report(`写入记忆失败 ${workspace.file}: ${String(error)}`);
+      const release = await acquireLock(workspace.file);
+      try {
+        const disk = await readWorkspaceFile(workspace.file);
+        const data = workspace.clearAll ? workspace.data : mergeWorkspaceData(disk, workspace.data);
+        workspace.data = data;
+        prune(workspace);
+        const temp = `${workspace.file}.${process.pid}.${Date.now()}.tmp`;
+        await writeFile(temp, JSON.stringify(workspace.data, null, 2), 'utf8');
+        await rename(temp, workspace.file);
+        workspace.clearAll = false;
+      } finally {
+        await release();
+      }
     });
-    return workspace.queue;
+    workspace.queue = run.catch(() => {});
+    return run.catch((error) => {
+      report(`写入记忆失败 ${workspace.file}: ${String(error)}`);
+      throw error;
+    });
   }
 
   async function writeHabitFile(workspace, entry) {
@@ -517,7 +599,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
     mergeStoredNotes(entry, workspace.data.sessions[entry.id]);
     workspace.data.sessions[entry.id] = toRecord(entry, cfg);
     workspace.data.updatedAt = Date.now();
-    queueWrite(workspace);
+    await queueWrite(workspace);
     if (cfg.habitsEnabled) {
       try {
         await writeHabitFile(workspace, entry);
@@ -645,13 +727,22 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
 
   function renderFacts(records) {
     const blocks = [];
+    let remaining = Math.max(200, cfg.maxChars);
     for (const record of records) {
+      if (remaining <= 0) break;
       const digest = typeof record.digest === 'string' && record.digest.length > 0
         ? record.digest
         : buildDigest(record, cfg);
       if (digest.trim().length === 0) continue;
       const title = record.title ? `「${record.title}」` : '';
-      blocks.push(`### 会话 ${record.id}${title}（更新于 ${stamp(record.updatedAt)}，${ageText(record.updatedAt)}）\n${digest}`);
+      const block = `### 会话 ${record.id}${title}（更新于 ${stamp(record.updatedAt)}，${ageText(record.updatedAt)}）\n${digest}`;
+      if (block.length > remaining) {
+        const partial = trimTo(block, remaining);
+        if (partial.length > 0) blocks.push(partial);
+        break;
+      }
+      blocks.push(block);
+      remaining -= block.length + 2;
     }
     if (blocks.length === 0) return '';
     return blocks.join('\n\n');
@@ -921,7 +1012,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       const entry = entries.get(agent.id);
       if (entry) {
         entry.updatedAt = Date.now();
-        void saveEntry(entry);
+        void saveEntry(entry).catch((error) => report(`收尾写入失败 ${agent.id}: ${String(error)}`));
         entries.delete(agent.id);
       }
     } catch (error) {
@@ -944,7 +1035,9 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
         });
       }
       ingest(entry, event);
-      if (event.type === 'turn/end') void saveEntry(entry);
+      if (event.type === 'turn/end') {
+        void saveEntry(entry).catch((error) => report(`回合写入失败 ${session.id}: ${String(error)}`));
+      }
     } catch (error) {
       report(`记录会话事件失败 ${session?.id}: ${String(error)}`);
     }
@@ -991,7 +1084,9 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
         },
         ttlDays: {
           type: 'integer',
-          description: '可选：多少天后过期（1-3650）；过期条目不再进入摘要/召回，除非 pinned。',
+          minimum: 0,
+          maximum: 3650,
+          description: '可选：多少天后过期（0 = 不过期，1-3650 天）；过期条目不再进入摘要/召回，除非 pinned。',
         },
       },
       required: ['note'],
@@ -1039,7 +1134,10 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
       const tags = Array.isArray(args?.tags) ? args.tags.slice(0, 5).map((tag) => clip(String(tag), 24)) : [];
       const time = Date.now();
       const id = memoryId(kind === 'todo' ? 't' : 'n', clip(text, 400), time);
-      const ttlDays = typeof args?.ttlDays === 'number' ? clampInt(args.ttlDays, 0, 1, 3650) : 0;
+      const ttlInput = args?.ttlDays;
+      const ttlDays = typeof ttlInput === 'number' && ttlInput > 0
+        ? Math.min(3650, Math.max(1, Math.trunc(ttlInput)))
+        : 0;
       const expiresAt = ttlDays > 0 ? time + ttlDays * DAY_MS : undefined;
       const supersedeIds = new Set(
         (Array.isArray(args?.supersedes) ? args.supersedes : [args?.supersedes])
@@ -1809,16 +1907,30 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
     }
 
     if (head === 'clear') {
+      workspace.clearAll = true;
       workspace.data.sessions = {};
       workspace.data.updatedAt = Date.now();
-      await queueWrite(workspace);
+      try {
+        await queueWrite(workspace);
+      } catch (error) {
+        workspace.clearAll = false;
+        return { kind: 'error', text: `清除失败，未删除任何数据：${String(error)}` };
+      }
       for (const entry of entries.values()) {
         if (entry.cwdKey === workspace.key) {
+          entry.items = [];
+          entry.goals = [];
           entry.notes = [];
           entry.openItems = [];
+          entry.style = newStyle();
+          entry.title = '';
+          entry.rawChars = 0;
+          entry.turns = 0;
+          entry.turnOpen = false;
+          entry.updatedAt = Date.now();
         }
       }
-      return { kind: 'success', text: '已清除该工作目录保存的会话事实；当前会话之后的回合会重新开始记录。交互习惯未受影响，使用 /memory habits clear 清除。' };
+      return { kind: 'success', text: '已清除该工作区的持久事实、当前 live 条目的对话/目标/要点/待办；当前会话之后的回合会重新开始记录。交互习惯未受影响，使用 /memory habits clear 清除。' };
     }
 
     if (head === 'habits') {
@@ -1883,7 +1995,7 @@ export function apply(ctx, config) {  const cfg = readConfig(config);
   try {
     for (const session of ctx.sessions.list()) {
       const entry = ensureEntry(session, true);
-      if (entry) void saveEntry(entry);
+      if (entry) void saveEntry(entry).catch((error) => report(`初始化写入失败 ${session.id}: ${String(error)}`));
     }
   } catch (error) {
     report(`初始化已有会话失败: ${String(error)}`);

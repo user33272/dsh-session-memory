@@ -1,7 +1,7 @@
 {
   "name": "dsh-session-memory",
-  "version": "1.6.3",
-  "description": "Local DeepSeek Harness memory with per-workspace identity/persona isolation, structured work-memory recall (relevance-ranked notes/todos, no tool-call noise), pinned/open-item/TTL/supersedes semantics, and optional cross-workspace work-memory reading.",
+  "version": "1.7.1",
+  "description": "Local DeepSeek Harness memory with per-workspace identity/persona isolation, hard-budgeted work digests, awaited atomic writes with cross-process locking and corrupt-file backups, structured recall, and optional cross-workspace reading.",
   "type": "module",
   "exports": {
     ".": "./index.js",
