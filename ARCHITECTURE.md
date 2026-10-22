@@ -1,6 +1,6 @@
 # 会话记忆（Session Memory）插件架构
 
-适用版本：**1.9.1**
+适用版本：**1.9.2**
 源码目录：`<repo>`
 配套文档：[USAGE.md](USAGE.md)（怎么用）、[README.md](README.md)（配置速查）
 

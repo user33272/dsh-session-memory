@@ -64,6 +64,8 @@ window.__ModuleLoader__.load({
       pinsWhy: 'Why',
       pinsNote: 'Note',
       pinsTodo: 'Todo',
+      pinsWorkspace: 'Workspace',
+      pinsScopeHint: 'Pinned entries are stored per workspace; the list below is grouped by workspace.',
       cancel: 'Cancel',
       apply: 'Apply',
       habitsTitle: 'Interaction habits',
@@ -132,6 +134,8 @@ window.__ModuleLoader__.load({
       pinsWhy: '为什么',
       pinsNote: '要点',
       pinsTodo: '待办',
+      pinsWorkspace: '工作区',
+      pinsScopeHint: '钉住条目按工作区隔离存储；下面按工作区分组显示，标题优先用工作区名称，后面是真实路径。',
       cancel: '取消',
       apply: '确定',
       habitsTitle: '交互习惯',
@@ -362,11 +366,19 @@ window.__ModuleLoader__.load({
         footer));
     }
 
-    function PinnedPanelButton({ wide, t }) {
+    function PinnedPanelButton({ wide, t, useWorkspaces }) {
       const [open, setOpen] = React.useState(false);
       const [data, setData] = React.useState(null);
       const [status, setStatus] = React.useState('idle');
       const [error, setError] = React.useState('');
+      const snapshot = typeof useWorkspaces === 'function' ? useWorkspaces((value) => value) : undefined;
+      const workspaceNames = React.useMemo(() => {
+        const names = new Map();
+        for (const option of workspaceOptionsFrom(snapshot)) {
+          names.set(option.path.toLowerCase(), option.label);
+        }
+        return names;
+      }, [snapshot]);
 
       const load = React.useCallback(async () => {
         setStatus('loading');
@@ -448,10 +460,25 @@ window.__ModuleLoader__.load({
         },
           h('div', {
             style: {
+              display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap',
               fontSize: '12px', color: 'var(--dsw-alias-label-secondary)',
               wordBreak: 'break-all',
             },
-          }, workspace.cwd),
+          },
+            h('span', {
+              style: {
+                fontSize: '11px', padding: '1px 6px', borderRadius: '999px',
+                background: 'var(--dsw-alias-bg-layer-1)',
+                color: 'var(--dsw-alias-label-secondary)',
+              },
+            }, t('pinsWorkspace')),
+            h('strong', { style: { color: 'var(--dsw-alias-label-primary)' } }, workspaceNames.get(workspace.cwd.toLowerCase()) && workspaceNames.get(workspace.cwd.toLowerCase()) !== workspace.cwd
+              ? workspaceNames.get(workspace.cwd.toLowerCase())
+              : workspace.cwd),
+            workspaceNames.get(workspace.cwd.toLowerCase()) && workspaceNames.get(workspace.cwd.toLowerCase()) !== workspace.cwd
+              ? h('code', { style: { fontSize: '11px' } }, workspace.cwd)
+              : null,
+            h('span', { style: { marginLeft: 'auto' } }, `${(workspace.notes?.length ?? 0) + (workspace.todos?.length ?? 0)} 条`)),
           items);
       });
 
@@ -493,6 +520,7 @@ window.__ModuleLoader__.load({
           status === 'ready' ? h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' } }, t('pinsCount', { count: total })) : null,
           h('button', { type: 'button', style: styles.button, onClick: () => void load() }, t('pinsRefresh')),
           h('button', { type: 'button', style: styles.button, onClick: () => setOpen(false) }, t('pinsClose'))),
+        h('p', { style: styles.hint }, t('pinsScopeHint')),
         h('div', {
           style: { overflowY: 'auto', display: 'grid', gap: '14px', paddingRight: '4px' },
         }, body))), document.body) : null;      return h(React.Fragment, null,
